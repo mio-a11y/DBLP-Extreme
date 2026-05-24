@@ -248,9 +248,9 @@ int main(int argc, char* argv[]) {
             }
 
             const auto t_parse_begin = std::chrono::steady_clock::now();
-            ExtremeParser parser(1);  // 单线程，降低内存占用
+            ExtremeParser parser(1);
             engine.reset_global_indexes();
-            engine.load_f5_keyword_segment_checked(0);  // 跳过缓存，从 XML 构建
+            engine.load_f5_keyword_segment_checked(0);
 
             bool any_chunk = false;
             parser.parse_file_streaming(xml_path.c_str(),

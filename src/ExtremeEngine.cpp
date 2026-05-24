@@ -1473,9 +1473,6 @@ void ExtremeEngine::merge_local_indexes(std::vector<std::unique_ptr<LocalIndex>>
 
     // 清理旧数据 + 初始化
     reset_global_indexes();
-    author_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
-    title_exact_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
-    keyword_global_.reserve_capacity(static_cast<std::size_t>(1) << 25);
 
     std::size_t expected_docs = 0;
     for (const auto& li : local_storage_) {
@@ -1494,11 +1491,8 @@ void ExtremeEngine::merge_local_indexes(std::vector<std::unique_ptr<LocalIndex>>
 void ExtremeEngine::reset_global_indexes() {
     forward_index_.clear();
     author_global_.clear();
-    author_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
     title_exact_global_.clear();
-    title_exact_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
     keyword_global_.clear();
-    keyword_global_.reserve_capacity(static_cast<std::size_t>(1) << 25);
     f1_author_trigram_ids_.clear();
     f1_author_lexicon_.clear();
     f1_author_doc_counts_.clear();
@@ -1557,6 +1551,8 @@ void ExtremeEngine::merge_one_local(std::unique_ptr<LocalIndex> li) {
             }
         });
     }
+
+    chunk_arenas_.push_back(std::move(li->arena));
 }
 
 void ExtremeEngine::finalize_merge_after_streaming() {

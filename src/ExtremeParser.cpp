@@ -7,6 +7,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <iostream>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -779,12 +780,24 @@ void ExtremeParser::parse_file_streaming(const char* utf8_path,
                     work_queue.pop_front();
                 }
                 queue_room_cv.notify_one();
-                std::unique_ptr<LocalIndex> local = parse_chunk_worker(std::move(item.chunk));
-                {
+                try {
+                    std::unique_ptr<LocalIndex> local = parse_chunk_worker(std::move(item.chunk));
+                    {
+                        std::lock_guard<std::mutex> lk(completed_mu);
+                        completed.emplace(item.seq, std::move(local));
+                    }
+                    completed_cv.notify_one();
+                } catch (const std::exception& e) {
+                    std::cerr << "[ERROR] worker 异常: " << e.what() << " (chunk #" << item.seq << ")\n";
                     std::lock_guard<std::mutex> lk(completed_mu);
-                    completed.emplace(item.seq, std::move(local));
+                    completed.emplace(item.seq, nullptr);
+                    completed_cv.notify_one();
+                } catch (...) {
+                    std::cerr << "[ERROR] worker 未知异常 (chunk #" << item.seq << ")\n";
+                    std::lock_guard<std::mutex> lk(completed_mu);
+                    completed.emplace(item.seq, nullptr);
+                    completed_cv.notify_one();
                 }
-                completed_cv.notify_one();
             }
         });
     }
@@ -842,16 +855,30 @@ void ExtremeParser::parse_file_streaming(const char* utf8_path,
     }
     work_cv.notify_all();
 
-    // 关键：按序回调，不累积全部结果
-    for (std::size_t emit_seq = 0; emit_seq < submit_seq; ++emit_seq) {
-        std::unique_lock<std::mutex> lk(completed_mu);
-        completed_cv.wait(lk, [&]() { return completed.find(emit_seq) != completed.end(); });
-        auto it = completed.find(emit_seq);
-        on_chunk(std::move(it->second));
-        completed.erase(it);
-    }
+    // RAII: 确保 worker 线程在函数退出前全部 join
+    struct WorkerGuard {
+        std::vector<std::thread>& w;
+        ~WorkerGuard() {
+            for (std::thread& th : w) {
+                if (th.joinable()) th.join();
+            }
+        }
+    } guard{workers};
 
-    for (std::thread& th : workers) {
-        if (th.joinable()) th.join();
+    // 按序回调，边处理边释放，避免堆积
+    for (std::size_t emit_seq = 0; emit_seq < submit_seq; ++emit_seq) {
+        std::unique_ptr<LocalIndex> local;
+        {
+            std::unique_lock<std::mutex> lk(completed_mu);
+            completed_cv.wait(lk, [&]() { return completed.find(emit_seq) != completed.end(); });
+            auto it = completed.find(emit_seq);
+            local = std::move(it->second);
+            completed.erase(it);
+        }
+        if (local == nullptr) {
+            std::cerr << "[ERROR] chunk #" << emit_seq << " 解析失败\n";
+            break;
+        }
+        on_chunk(std::move(local));
     }
 }

@@ -147,6 +147,7 @@ private:
     void execute_f6_author_local_maximal_cliques(std::string_view target_author_raw) const;
 
     std::vector<std::unique_ptr<LocalIndex>> local_storage_;
+    std::vector<StringArena> chunk_arenas_;
     std::vector<Document> forward_index_;
     FlatMap<std::string_view, std::vector<Posting>> author_global_;
     FlatMap<std::string_view, std::vector<Posting>> title_exact_global_;
