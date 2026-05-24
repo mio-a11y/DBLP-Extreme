@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DBLP Extreme — 可视化</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <h1>DBLP Extreme</h1>
+  <nav class="tabs">
+    <button class="tab active" data-tab="search-author">按作者搜索</button>
+    <button class="tab" data-tab="search-title">按标题搜索</button>
+    <button class="tab" data-tab="search-keyword">关键字搜索</button>
+    <span class="tab-sep">|</span>
+    <button class="tab" data-tab="graph">合作关系图</button>
+    <button class="tab" data-tab="top100">Top 100</button>
+    <button class="tab" data-tab="years">年度热词</button>
+    <button class="tab" data-tab="cliques">聚团统计</button>
+  </nav>
+  <div id="data-source-badge" class="badge">数据源: 检测中…</div>
+</header>
+
+<main>
+  <!-- Tab: 按作者搜索 -->
+  <section class="view active" id="view-search-author">
+    <div class="search-box">
+      <input id="sa-input" type="text" placeholder="输入作者名（如 H. Vincent Poor）…" autocomplete="off">
+      <button id="sa-btn">搜索</button>
+      <span id="sa-hint" class="hint"></span>
+    </div>
+    <div id="sa-results" class="search-results"></div>
+  </section>
+
+  <!-- Tab: 按标题搜索 -->
+  <section class="view" id="view-search-title">
+    <div class="search-box">
+      <input id="st-input" type="text" placeholder="输入标题关键词（如 neural network）…" autocomplete="off">
+      <button id="st-btn">搜索</button>
+      <span id="st-hint" class="hint"></span>
+    </div>
+    <div id="st-results" class="search-results"></div>
+  </section>
+
+  <!-- Tab: 关键字搜索 -->
+  <section class="view" id="view-search-keyword">
+    <div class="search-box">
+      <input id="sk-input" type="text" placeholder="输入关键字（如 graph deep learning）…" autocomplete="off">
+      <button id="sk-btn">搜索</button>
+      <span id="sk-hint" class="hint"></span>
+    </div>
+    <div id="sk-results" class="search-results"></div>
+  </section>
+
+  <!-- Tab: 合作关系图 -->
+  <section class="view" id="view-graph">
+    <div class="graph-controls">
+      <input id="author-input" type="text" placeholder="输入作者名（建议从 Top 100 中选）" autocomplete="off">
+      <button id="render-btn">渲染合作网络</button>
+      <span id="graph-hint" class="hint">输入任意作者名，实时生成合作网络</span>
+    </div>
+    <div class="graph-layout">
+      <div id="cy" class="cy-canvas"></div>
+      <aside class="paper-panel">
+        <div class="paper-panel-header">
+          <h3 id="paper-panel-title">论文列表</h3>
+          <span id="paper-panel-count" class="muted">—</span>
+        </div>
+        <ul id="paper-list" class="paper-list"></ul>
+      </aside>
+    </div>
+  </section>
+
+  <!-- Tab: Top 100 -->
+  <section class="view" id="view-top100">
+    <div class="split">
+      <div class="split-left">
+        <h2>Top 100 作者 (按发文数)</h2>
+        <table id="top100-table" class="data-table">
+          <thead><tr><th>#</th><th>作者</th><th>发文数</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="split-right">
+        <div class="chart-controls">
+          <label>显示前
+            <select id="top100-range">
+              <option value="30">30</option>
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+            </select>
+            位
+          </label>
+        </div>
+        <div class="chart-wrap"><canvas id="top100-chart"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Tab: 年度热词 -->
+  <section class="view" id="view-years">
+    <div class="chart-controls">
+      <label>年份
+        <select id="year-select"></select>
+      </label>
+    </div>
+    <div class="chart-wrap tall"><canvas id="year-chart"></canvas></div>
+  </section>
+
+  <!-- Tab: 聚团统计 -->
+  <section class="view" id="view-cliques">
+    <div class="chart-controls">
+      <label>最大阶数
+        <select id="clique-order-select">
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5" selected>5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+          <option value="8">8</option>
+          <option value="9">9</option>
+          <option value="10">10</option>
+          <option value="11">11</option>
+          <option value="12">12</option>
+        </select>
+      </label>
+      <button id="clique-compute-btn">开始计算</button>
+      <span id="clique-hint" class="hint"></span>
+    </div>
+    <div id="clique-info" class="clique-info" style="display:none"></div>
+    <div class="chart-wrap tall"><canvas id="clique-chart"></canvas></div>
+  </section>
+</main>
+
+<footer class="footer muted">
+  科学文献管理系统 · 数据结构大作业 · 数据来源 DBLP
+</footer>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

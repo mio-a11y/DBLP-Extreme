@@ -1,0 +1,118 @@
+{
+  "center": "Jeffrey D. Ullman",
+  "nodes": [
+    {"id": "Jeffrey D. Ullman", "paper_count": 512},
+    {"id": "Alfred V. Aho", "paper_count": 287},
+    {"id": "John E. Hopcroft", "paper_count": 264},
+    {"id": "Hector Garcia-Molina", "paper_count": 487},
+    {"id": "Anand Rajaraman", "paper_count": 94},
+    {"id": "Jennifer Widom", "paper_count": 286},
+    {"id": "Catriel Beeri", "paper_count": 160},
+    {"id": "Ronald Fagin", "paper_count": 178},
+    {"id": "Mihalis Yannakakis", "paper_count": 215},
+    {"id": "Sergey Brin", "paper_count": 47},
+    {"id": "Rajeev Motwani", "paper_count": 198},
+    {"id": "Christos H. Papadimitriou", "paper_count": 461},
+    {"id": "Yehoshua Sagiv", "paper_count": 156},
+    {"id": "Moshe Y. Vardi", "paper_count": 245},
+    {"id": "Surajit Chaudhuri", "paper_count": 327},
+    {"id": "Phokion G. Kolaitis", "paper_count": 132},
+    {"id": "Yannis Papakonstantinou", "paper_count": 87},
+    {"id": "Shuky Sagiv", "paper_count": 56}
+  ],
+  "edges": [
+    {"source": "Jeffrey D. Ullman", "target": "Alfred V. Aho", "weight": 38},
+    {"source": "Jeffrey D. Ullman", "target": "John E. Hopcroft", "weight": 24},
+    {"source": "Jeffrey D. Ullman", "target": "Hector Garcia-Molina", "weight": 18},
+    {"source": "Jeffrey D. Ullman", "target": "Anand Rajaraman", "weight": 12},
+    {"source": "Jeffrey D. Ullman", "target": "Jennifer Widom", "weight": 22},
+    {"source": "Jeffrey D. Ullman", "target": "Catriel Beeri", "weight": 9},
+    {"source": "Jeffrey D. Ullman", "target": "Ronald Fagin", "weight": 7},
+    {"source": "Jeffrey D. Ullman", "target": "Mihalis Yannakakis", "weight": 15},
+    {"source": "Jeffrey D. Ullman", "target": "Sergey Brin", "weight": 6},
+    {"source": "Jeffrey D. Ullman", "target": "Rajeev Motwani", "weight": 11},
+    {"source": "Jeffrey D. Ullman", "target": "Christos H. Papadimitriou", "weight": 5},
+    {"source": "Jeffrey D. Ullman", "target": "Yehoshua Sagiv", "weight": 8},
+    {"source": "Jeffrey D. Ullman", "target": "Moshe Y. Vardi", "weight": 4},
+    {"source": "Jeffrey D. Ullman", "target": "Surajit Chaudhuri", "weight": 3},
+    {"source": "Jeffrey D. Ullman", "target": "Phokion G. Kolaitis", "weight": 3},
+    {"source": "Jeffrey D. Ullman", "target": "Yannis Papakonstantinou", "weight": 7},
+    {"source": "Jeffrey D. Ullman", "target": "Shuky Sagiv", "weight": 4},
+    {"source": "Alfred V. Aho", "target": "John E. Hopcroft", "weight": 16},
+    {"source": "Hector Garcia-Molina", "target": "Jennifer Widom", "weight": 14},
+    {"source": "Catriel Beeri", "target": "Yehoshua Sagiv", "weight": 6},
+    {"source": "Mihalis Yannakakis", "target": "Christos H. Papadimitriou", "weight": 18},
+    {"source": "Sergey Brin", "target": "Rajeev Motwani", "weight": 7},
+    {"source": "Anand Rajaraman", "target": "Hector Garcia-Molina", "weight": 5},
+    {"source": "Moshe Y. Vardi", "target": "Phokion G. Kolaitis", "weight": 9},
+    {"source": "Ronald Fagin", "target": "Moshe Y. Vardi", "weight": 8}
+  ],
+  "papers_by_author": {
+    "Jeffrey D. Ullman": [
+      {"doc_id": 1001, "title": "Principles of Database Systems", "year": 1982, "journal": "Computer Science Press", "ee": "https://dblp.org/rec/books/cs/Ullman82"},
+      {"doc_id": 1002, "title": "Introduction to Automata Theory, Languages, and Computation", "year": 1979, "journal": "Addison-Wesley", "ee": "https://dblp.org/rec/books/aw/HopcroftU79"},
+      {"doc_id": 1003, "title": "Compilers: Principles, Techniques, and Tools", "year": 1986, "journal": "Addison-Wesley", "ee": "https://dblp.org/rec/books/aw/AhoSU86"},
+      {"doc_id": 1004, "title": "Mining of Massive Datasets", "year": 2011, "journal": "Cambridge University Press", "ee": "https://dblp.org/rec/books/cu/LeskovecRU14"},
+      {"doc_id": 1005, "title": "Optimal Implementation of Conjunctive Queries in Relational Databases", "year": 1977, "journal": "STOC", "ee": "https://dblp.org/rec/conf/stoc/ChandraM77"},
+      {"doc_id": 1006, "title": "The Theory of Joins in Relational Databases", "year": 1979, "journal": "TODS", "ee": ""},
+      {"doc_id": 1007, "title": "Implementation of Logical Query Languages for Databases", "year": 1985, "journal": "TODS", "ee": ""}
+    ],
+    "Alfred V. Aho": [
+      {"doc_id": 1101, "title": "The Design and Analysis of Computer Algorithms", "year": 1974, "journal": "Addison-Wesley", "ee": ""},
+      {"doc_id": 1102, "title": "Compilers: Principles, Techniques, and Tools", "year": 1986, "journal": "Addison-Wesley", "ee": "https://dblp.org/rec/books/aw/AhoSU86"},
+      {"doc_id": 1103, "title": "Foundations of Computer Science", "year": 1992, "journal": "Computer Science Press", "ee": ""}
+    ],
+    "John E. Hopcroft": [
+      {"doc_id": 1201, "title": "Introduction to Automata Theory, Languages, and Computation", "year": 1979, "journal": "Addison-Wesley", "ee": ""},
+      {"doc_id": 1202, "title": "An n log n Algorithm for Minimizing States in a Finite Automaton", "year": 1971, "journal": "Theory of Machines and Computations", "ee": ""}
+    ],
+    "Hector Garcia-Molina": [
+      {"doc_id": 1301, "title": "Database Systems: The Complete Book", "year": 2008, "journal": "Pearson", "ee": ""},
+      {"doc_id": 1302, "title": "The Anatomy of a Mediator", "year": 1995, "journal": "VLDB", "ee": ""},
+      {"doc_id": 1303, "title": "WebBase: A repository of Web pages", "year": 2000, "journal": "WWW", "ee": ""}
+    ],
+    "Anand Rajaraman": [
+      {"doc_id": 1401, "title": "Mining of Massive Datasets", "year": 2011, "journal": "Cambridge University Press", "ee": ""}
+    ],
+    "Jennifer Widom": [
+      {"doc_id": 1501, "title": "Database Systems: The Complete Book", "year": 2008, "journal": "Pearson", "ee": ""},
+      {"doc_id": 1502, "title": "Active Database Systems", "year": 1996, "journal": "Morgan Kaufmann", "ee": ""}
+    ],
+    "Catriel Beeri": [
+      {"doc_id": 1601, "title": "A Sophisticate's Introduction to Database Normalization Theory", "year": 1978, "journal": "VLDB", "ee": ""}
+    ],
+    "Ronald Fagin": [
+      {"doc_id": 1701, "title": "Multivalued Dependencies and a New Normal Form", "year": 1977, "journal": "TODS", "ee": ""}
+    ],
+    "Mihalis Yannakakis": [
+      {"doc_id": 1801, "title": "Algorithms for Acyclic Database Schemes", "year": 1981, "journal": "VLDB", "ee": ""}
+    ],
+    "Sergey Brin": [
+      {"doc_id": 1901, "title": "The Anatomy of a Large-Scale Hypertextual Web Search Engine", "year": 1998, "journal": "WWW", "ee": "https://dblp.org/rec/conf/www/BrinP98"}
+    ],
+    "Rajeev Motwani": [
+      {"doc_id": 2001, "title": "Randomized Algorithms", "year": 1995, "journal": "Cambridge University Press", "ee": ""}
+    ],
+    "Christos H. Papadimitriou": [
+      {"doc_id": 2101, "title": "Computational Complexity", "year": 1994, "journal": "Addison-Wesley", "ee": ""}
+    ],
+    "Yehoshua Sagiv": [
+      {"doc_id": 2201, "title": "Equivalences Among Relational Expressions", "year": 1979, "journal": "SIAM J. Comput.", "ee": ""}
+    ],
+    "Moshe Y. Vardi": [
+      {"doc_id": 2301, "title": "The Complexity of Relational Query Languages", "year": 1982, "journal": "STOC", "ee": ""}
+    ],
+    "Surajit Chaudhuri": [
+      {"doc_id": 2401, "title": "An Overview of Query Optimization in Relational Systems", "year": 1998, "journal": "PODS", "ee": ""}
+    ],
+    "Phokion G. Kolaitis": [
+      {"doc_id": 2501, "title": "Conjunctive-Query Containment and Constraint Satisfaction", "year": 1998, "journal": "PODS", "ee": ""}
+    ],
+    "Yannis Papakonstantinou": [
+      {"doc_id": 2601, "title": "Object Exchange Across Heterogeneous Information Sources", "year": 1995, "journal": "ICDE", "ee": ""}
+    ],
+    "Shuky Sagiv": [
+      {"doc_id": 2701, "title": "On the Implication Problem for Functional and Multivalued Dependencies", "year": 1980, "journal": "TODS", "ee": ""}
+    ]
+  }
+}

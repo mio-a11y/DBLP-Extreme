@@ -1,0 +1,6597 @@
+#include "ExtremeEngine.h"
+
+#include "Analyzer.h"
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <bit>
+#include <chrono>
+#include <cctype>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <filesystem>
+#include <functional>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <mutex>
+#include <ostream>
+#include <queue>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+
+namespace {
+
+[[nodiscard]] std::string_view trim_sv(std::string_view s) noexcept {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())) != 0) {
+        s.remove_prefix(1);
+    }
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())) != 0) {
+        s.remove_suffix(1);
+    }
+    return s;
+}
+
+void for_each_author_segment(std::string_view authors, auto&& fn) {
+    std::size_t i = 0;
+    while (i < authors.size()) {
+        const std::size_t j = authors.find("| ", i);
+        if (j == std::string_view::npos) {
+            fn(trim_sv(std::string_view(authors.data() + i, authors.size() - i)));
+            break;
+        }
+        fn(trim_sv(std::string_view(authors.data() + i, j - i)));
+        i = j + 2;
+    }
+}
+
+[[nodiscard]] std::string_view normalized_span(StringArena& arena, std::string_view raw) {
+    const std::vector<std::string_view> toks = Analyzer::normalize_and_tokenize(raw, arena);
+    if (toks.empty()) {
+        return {};
+    }
+    const char* const beg = toks.front().data();
+    const char* const ed = toks.back().data() + toks.back().size();
+    return {beg, static_cast<std::size_t>(ed - beg)};
+}
+
+[[nodiscard]] std::filesystem::path locate_f4_config_file(std::string_view file_name) {
+    namespace fs = std::filesystem;
+    const fs::path file_path{std::string(file_name)};
+    const std::array<fs::path, 8> candidates = {
+        fs::path("config") / file_path,
+        fs::path("..") / "config" / file_path,
+        fs::path("..") / ".." / "config" / file_path,
+        fs::path("..") / ".." / ".." / "config" / file_path,
+        fs::path("..") / file_path,
+        fs::path("..") / ".." / file_path,
+        fs::path("..") / ".." / ".." / file_path,
+        file_path,
+    };
+    for (const fs::path& p : candidates) {
+        std::error_code ec;
+        if (fs::exists(p, ec) && !ec) {
+            return p;
+        }
+    }
+    return {};
+}
+
+[[nodiscard]] std::filesystem::path locate_f5_segment_file_path() {
+    namespace fs = std::filesystem;
+    const fs::path file_name = "f5_keyword.seg";
+    const fs::path rel = fs::path("segments") / file_name;
+    std::error_code cwd_ec;
+    const fs::path cwd = fs::current_path(cwd_ec);
+    const std::array<fs::path, 5> candidates = {
+        cwd_ec ? rel : cwd / rel,
+        cwd_ec ? fs::path("build") / rel : cwd.parent_path() / "build" / rel,
+        cwd_ec ? fs::path("..") / "build" / rel : cwd.parent_path() / rel,
+        fs::path(rel),
+        fs::path("cache") / rel,
+    };
+    for (const fs::path& p : candidates) {
+        std::error_code ec;
+        if (fs::exists(p, ec) && !ec) {
+            return p;
+        }
+    }
+    return candidates.front();
+}
+
+void f7_json_write_string(std::ostream& os, std::string_view s) {
+    os << '"';
+    for (char c : s) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        switch (c) {
+            case '"': os << "\\\""; break;
+            case '\\': os << "\\\\"; break;
+            case '\n': os << "\\n"; break;
+            case '\r': os << "\\r"; break;
+            case '\t': os << "\\t"; break;
+            case '\b': os << "\\b"; break;
+            case '\f': os << "\\f"; break;
+            default:
+                if (uc < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(uc));
+                    os << buf;
+                } else {
+                    os << c;
+                }
+        }
+    }
+    os << '"';
+}
+
+[[nodiscard]] std::string f7_author_to_slug(std::string_view name) {
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (uc >= 'A' && uc <= 'Z') {
+            out.push_back(static_cast<char>(uc + 32));
+        } else if ((uc >= 'a' && uc <= 'z') || (uc >= '0' && uc <= '9') || uc == '-') {
+            out.push_back(static_cast<char>(uc));
+        } else if (std::isspace(static_cast<int>(uc)) != 0 || uc == '_') {
+            if (!out.empty() && out.back() != '_') {
+                out.push_back('_');
+            }
+        }
+    }
+    while (!out.empty() && out.back() == '_') {
+        out.pop_back();
+    }
+    return out;
+}
+
+[[nodiscard]] std::filesystem::path locate_f7_output_dir() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = fs::path("data");
+    fs::create_directories(dir / "ego", ec);
+    return dir;
+}
+
+[[nodiscard]] std::filesystem::path locate_serving_segment_file_path() {
+    namespace fs = std::filesystem;
+    const fs::path file_name = "serving_index.seg";
+    const fs::path rel = fs::path("segments") / file_name;
+    std::error_code cwd_ec;
+    const fs::path cwd = fs::current_path(cwd_ec);
+    const std::array<fs::path, 5> candidates = {
+        cwd_ec ? rel : cwd / rel,
+        cwd_ec ? fs::path("build") / rel : cwd.parent_path() / "build" / rel,
+        cwd_ec ? fs::path("..") / "build" / rel : cwd.parent_path() / rel,
+        fs::path(rel),
+        fs::path("cache") / rel,
+    };
+    for (const fs::path& p : candidates) {
+        std::error_code ec;
+        if (fs::exists(p, ec) && !ec) {
+            return p;
+        }
+    }
+    return candidates.front();
+}
+
+[[nodiscard]] std::filesystem::path locate_f6_collab_graph_file_path() {
+    namespace fs = std::filesystem;
+    const fs::path file_name = "f6_collab_graph.seg";
+    const fs::path rel = fs::path("segments") / file_name;
+    std::error_code cwd_ec;
+    const fs::path cwd = fs::current_path(cwd_ec);
+    const std::array<fs::path, 5> candidates = {
+        cwd_ec ? rel : cwd / rel,
+        cwd_ec ? fs::path("build") / rel : cwd.parent_path() / "build" / rel,
+        cwd_ec ? fs::path("..") / "build" / rel : cwd.parent_path() / rel,
+        fs::path(rel),
+        fs::path("cache") / rel,
+    };
+    for (const fs::path& p : candidates) {
+        std::error_code ec;
+        if (fs::exists(p, ec) && !ec) {
+            return p;
+        }
+    }
+    return candidates.front();
+}
+
+[[nodiscard]] std::filesystem::path locate_f6_author_participation_file_path() {
+    namespace fs = std::filesystem;
+    const fs::path file_name = "f6_author_participation.seg";
+    const fs::path rel = fs::path("segments") / file_name;
+    std::error_code cwd_ec;
+    const fs::path cwd = fs::current_path(cwd_ec);
+    const std::array<fs::path, 5> candidates = {
+        cwd_ec ? rel : cwd / rel,
+        cwd_ec ? fs::path("build") / rel : cwd.parent_path() / "build" / rel,
+        cwd_ec ? fs::path("..") / "build" / rel : cwd.parent_path() / rel,
+        fs::path(rel),
+        fs::path("cache") / rel,
+    };
+    for (const fs::path& p : candidates) {
+        std::error_code ec;
+        if (fs::exists(p, ec) && !ec) {
+            return p;
+        }
+    }
+    return candidates.front();
+}
+
+[[nodiscard]] std::filesystem::path locate_f6_global_clique_counts_file_path(const std::uint32_t max_order) {
+    namespace fs = std::filesystem;
+    const fs::path file_name = "f6_global_clique_counts_k" + std::to_string(max_order) + ".seg";
+    const fs::path rel = fs::path("segments") / file_name;
+    std::error_code cwd_ec;
+    const fs::path cwd = fs::current_path(cwd_ec);
+    const std::array<fs::path, 5> candidates = {
+        cwd_ec ? rel : cwd / rel,
+        cwd_ec ? fs::path("build") / rel : cwd.parent_path() / "build" / rel,
+        cwd_ec ? fs::path("..") / "build" / rel : cwd.parent_path() / rel,
+        fs::path(rel),
+        fs::path("cache") / rel,
+    };
+    for (const fs::path& p : candidates) {
+        std::error_code ec;
+        if (fs::exists(p, ec) && !ec) {
+            return p;
+        }
+    }
+    return candidates.front();
+}
+
+void write_varuint32(std::ostream& os, std::uint32_t v) {
+    while (v >= 0x80u) {
+        const unsigned char b = static_cast<unsigned char>((v & 0x7Fu) | 0x80u);
+        os.put(static_cast<char>(b));
+        v >>= 7u;
+    }
+    os.put(static_cast<char>(static_cast<unsigned char>(v)));
+}
+
+void write_varuint64(std::ostream& os, std::uint64_t v) {
+    while (v >= 0x80u) {
+        const unsigned char b = static_cast<unsigned char>((v & 0x7Fu) | 0x80u);
+        os.put(static_cast<char>(b));
+        v >>= 7u;
+    }
+    os.put(static_cast<char>(static_cast<unsigned char>(v)));
+}
+
+[[nodiscard]] bool read_varuint32(std::istream& is, std::uint32_t& out) {
+    out = 0;
+    int shift = 0;
+    for (int i = 0; i < 5; ++i) {
+        const int ch = is.get();
+        if (ch == std::char_traits<char>::eof()) {
+            return false;
+        }
+        const std::uint32_t byte = static_cast<std::uint32_t>(static_cast<unsigned char>(ch));
+        out |= (byte & 0x7Fu) << shift;
+        if ((byte & 0x80u) == 0u) {
+            return true;
+        }
+        shift += 7;
+    }
+    return false;
+}
+
+[[nodiscard]] bool read_varuint64(std::istream& is, std::uint64_t& out) {
+    out = 0;
+    int shift = 0;
+    for (int i = 0; i < 10; ++i) {
+        const int ch = is.get();
+        if (ch == std::char_traits<char>::eof()) {
+            return false;
+        }
+        const std::uint64_t byte = static_cast<std::uint64_t>(static_cast<unsigned char>(ch));
+        out |= (byte & 0x7Fu) << shift;
+        if ((byte & 0x80u) == 0u) {
+            return true;
+        }
+        shift += 7;
+    }
+    return false;
+}
+
+void write_segment_string(std::ostream& os, std::string_view s) {
+    write_varuint32(os, static_cast<std::uint32_t>(std::min<std::size_t>(s.size(), 0xFFFFFFFFu)));
+    if (!s.empty()) {
+        os.write(s.data(), static_cast<std::streamsize>(s.size()));
+    }
+}
+
+[[nodiscard]] bool read_segment_string(std::istream& is, StringArena& arena, std::string_view& out) {
+    std::uint32_t len = 0;
+    if (!read_varuint32(is, len)) {
+        return false;
+    }
+    if (len == 0) {
+        out = {};
+        return true;
+    }
+    std::string buf(len, '\0');
+    is.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+    if (!is) {
+        return false;
+    }
+    out = arena.store(buf);
+    return true;
+}
+
+template <typename Map>
+void write_posting_map(std::ostream& out, const Map& map) {
+    write_varuint64(out, static_cast<std::uint64_t>(map.size()));
+    map.for_each([&](const std::string_view& key, const std::vector<Posting>& postings) {
+        write_segment_string(out, key);
+        write_varuint32(out, static_cast<std::uint32_t>(std::min<std::size_t>(postings.size(), 0xFFFFFFFFu)));
+        DocID prev_doc = 0;
+        for (const Posting& p : postings) {
+            write_varuint32(out, static_cast<std::uint32_t>(p.doc_id - prev_doc));
+            write_varuint32(out, p.tf);
+            prev_doc = p.doc_id;
+        }
+    });
+}
+
+template <typename Map>
+[[nodiscard]] bool read_posting_map(std::istream& in, StringArena& arena, Map& map) {
+    std::uint64_t count = 0;
+    if (!read_varuint64(in, count)) {
+        return false;
+    }
+    map.clear();
+    map.reserve_capacity(std::max<std::size_t>(1024, static_cast<std::size_t>(count) * 2));
+    for (std::uint64_t i = 0; i < count; ++i) {
+        std::string_view key;
+        if (!read_segment_string(in, arena, key)) {
+            return false;
+        }
+        std::uint32_t posting_count = 0;
+        if (!read_varuint32(in, posting_count)) {
+            return false;
+        }
+        std::vector<Posting> postings;
+        postings.reserve(posting_count);
+        DocID prev_doc = 0;
+        for (std::uint32_t p = 0; p < posting_count; ++p) {
+            std::uint32_t doc_delta = 0;
+            std::uint32_t tf = 0;
+            if (!read_varuint32(in, doc_delta) || !read_varuint32(in, tf)) {
+                return false;
+            }
+            const DocID did = static_cast<DocID>(prev_doc + doc_delta);
+            postings.push_back(Posting{did, tf});
+            prev_doc = did;
+        }
+        map[key] = std::move(postings);
+    }
+    return true;
+}
+
+struct F4StopWordRepository {
+    std::deque<std::string> owned_strings;
+    std::unordered_map<std::string_view, std::uint8_t> lookup;
+};
+
+[[nodiscard]] std::string_view f4_intern(F4StopWordRepository& repo, std::string token) {
+    repo.owned_strings.push_back(std::move(token));
+    const std::string& stable = repo.owned_strings.back();
+    return std::string_view(stable.data(), stable.size());
+}
+
+void add_f4_stop_word(F4StopWordRepository& repo, std::string token) {
+    if (token.empty()) {
+        return;
+    }
+    const std::string_view stable = f4_intern(repo, std::move(token));
+    repo.lookup[stable] = 1;
+}
+
+void load_default_f4_stop_words(F4StopWordRepository& repo) {
+    static constexpr std::array<std::string_view, 28> kBaseStopWords = {
+        "a", "about", "an", "and", "as", "at", "be", "by", "for", "from", "in", "into", "is", "it",
+        "of", "on", "or", "our", "that", "the", "their", "this", "to", "via", "we", "with", "you", "your"};
+    static constexpr std::array<std::string_view, 24> kAcademicStopWords = {
+        "algorithm", "algorithms", "analysis", "approach", "approaches", "based", "framework", "frameworks",
+        "method", "methods", "model", "models", "new", "novel", "paper", "papers", "research", "results",
+        "study", "system", "systems", "toward", "towards", "using"};
+    for (const std::string_view token : kBaseStopWords) {
+        add_f4_stop_word(repo, std::string(token));
+    }
+    for (const std::string_view token : kAcademicStopWords) {
+        add_f4_stop_word(repo, std::string(token));
+    }
+}
+
+void load_f4_stop_words_from_file(F4StopWordRepository& repo, const std::filesystem::path& file_path) {
+    if (file_path.empty()) {
+        return;
+    }
+    std::ifstream in(file_path);
+    if (!in.is_open()) {
+        return;
+    }
+
+    StringArena parse_arena(8u * 1024u);
+    std::string raw_line;
+    while (std::getline(in, raw_line)) {
+        const std::string_view line = trim_sv(raw_line);
+        if (line.empty() || line.front() == '#') {
+            continue;
+        }
+        parse_arena.reset();
+        const std::vector<std::string_view> tokens = Analyzer::normalize_and_tokenize(line, parse_arena);
+        for (const std::string_view token : tokens) {
+            add_f4_stop_word(repo, std::string(token));
+        }
+    }
+}
+
+void load_external_f4_stop_words(F4StopWordRepository& repo) {
+    load_f4_stop_words_from_file(repo, locate_f4_config_file("scientificstopwords_en.txt"));
+}
+
+[[nodiscard]] const F4StopWordRepository& get_f4_stop_word_repository() {
+    static const F4StopWordRepository repo = []() {
+        F4StopWordRepository built;
+        built.lookup.reserve(8192);
+        load_default_f4_stop_words(built);
+        load_external_f4_stop_words(built);
+        return built;
+    }();
+    return repo;
+}
+
+[[nodiscard]] bool is_f4_stop_word(std::string_view token) {
+    const F4StopWordRepository& repo = get_f4_stop_word_repository();
+    return repo.lookup.find(token) != repo.lookup.end();
+}
+
+[[nodiscard]] bool is_f4_all_digits(std::string_view token) noexcept {
+    if (token.empty()) {
+        return false;
+    }
+    for (const char ch : token) {
+        if (ch < '0' || ch > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool is_f4_year_like_token(std::string_view token) noexcept {
+    if (token.size() != 4 || !is_f4_all_digits(token)) {
+        return false;
+    }
+    int year = 0;
+    for (const char ch : token) {
+        year = year * 10 + (ch - '0');
+    }
+    return year >= 1900 && year <= 2099;
+}
+
+[[nodiscard]] bool is_f4_template_token(std::string_view token) noexcept {
+    static constexpr std::array<std::string_view, 32> kTemplateTokens = {
+        "challenge", "challenges", "conference", "conferences", "dataset", "datasets", "demo", "demos", "during",
+        "international", "issue", "issues", "part", "parts", "poster", "posters", "proceeding", "proceedings",
+        "session", "sessions", "shared", "special", "symposium", "symposia", "task", "tasks", "track", "tracks",
+        "tutorial", "tutorials", "volume", "volumes"};
+    return std::binary_search(kTemplateTokens.begin(), kTemplateTokens.end(), token);
+}
+
+[[nodiscard]] bool is_f4_noise_token(std::string_view token) noexcept {
+    return is_f4_all_digits(token) || is_f4_year_like_token(token) || is_f4_template_token(token);
+}
+
+[[nodiscard]] bool is_f4_valid_term(std::string_view token) {
+    return token.size() > 1 && !is_f4_stop_word(token) && !is_f4_noise_token(token);
+}
+
+struct F4PhraseAlias {
+    std::array<std::string_view, 4> parts;
+    std::size_t size;
+    std::string_view canonical;
+};
+
+struct F4AliasRepository {
+    struct PhraseRule {
+        std::vector<std::string_view> parts;
+        std::string_view canonical;
+    };
+
+    std::deque<std::string> owned_strings;
+    std::unordered_map<std::string_view, std::string_view> token_alias;
+    std::vector<PhraseRule> phrase_alias;
+};
+
+[[nodiscard]] std::string_view f4_intern(F4AliasRepository& repo, std::string token) {
+    repo.owned_strings.push_back(std::move(token));
+    const std::string& stable = repo.owned_strings.back();
+    return std::string_view(stable.data(), stable.size());
+}
+
+void add_f4_alias_rule(F4AliasRepository& repo, const std::vector<std::string>& lhs_tokens, std::string rhs_token) {
+    if (lhs_tokens.empty() || rhs_token.empty()) {
+        return;
+    }
+    const std::string_view canonical = f4_intern(repo, std::move(rhs_token));
+    if (lhs_tokens.size() == 1) {
+        const std::string_view lhs = f4_intern(repo, lhs_tokens.front());
+        repo.token_alias[lhs] = canonical;
+        return;
+    }
+
+    F4AliasRepository::PhraseRule incoming;
+    incoming.parts.reserve(lhs_tokens.size());
+    for (const std::string& token : lhs_tokens) {
+        incoming.parts.push_back(f4_intern(repo, token));
+    }
+    incoming.canonical = canonical;
+
+    for (F4AliasRepository::PhraseRule& existing : repo.phrase_alias) {
+        if (existing.parts.size() != incoming.parts.size()) {
+            continue;
+        }
+        if (std::equal(existing.parts.begin(), existing.parts.end(), incoming.parts.begin())) {
+            existing.canonical = incoming.canonical;
+            return;
+        }
+    }
+    repo.phrase_alias.push_back(std::move(incoming));
+}
+
+void load_default_f4_aliases(F4AliasRepository& repo) {
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 22> kTokenAliases = {{
+        {"bert", "bert"},
+        {"berts", "bert"},
+        {"cnn", "cnn"},
+        {"cnns", "cnn"},
+        {"gan", "gan"},
+        {"gans", "gan"},
+        {"gcn", "gcn"},
+        {"gcns", "gcn"},
+        {"gnn", "gnn"},
+        {"gnns", "gnn"},
+        {"gpt", "gpt"},
+        {"gpts", "gpt"},
+        {"llm", "llm"},
+        {"llms", "llm"},
+        {"lstm", "lstm"},
+        {"lstms", "lstm"},
+        {"nlp", "nlp"},
+        {"nlps", "nlp"},
+        {"rnn", "rnn"},
+        {"rnns", "rnn"},
+        {"vae", "vae"},
+        {"vaes", "vae"},
+    }};
+    for (const auto& kv : kTokenAliases) {
+        add_f4_alias_rule(repo, {std::string(kv.first)}, std::string(kv.second));
+    }
+
+    static constexpr std::array<F4PhraseAlias, 16> kPhraseAliases = {{
+        {{{"long", "short", "term", "memory"}}, 4, "lstm"},
+        {{{"convolutional", "neural", "network", ""}}, 3, "cnn"},
+        {{{"convolutional", "neural", "networks", ""}}, 3, "cnn"},
+        {{{"generative", "adversarial", "network", ""}}, 3, "gan"},
+        {{{"generative", "adversarial", "networks", ""}}, 3, "gan"},
+        {{{"graph", "convolutional", "network", ""}}, 3, "gcn"},
+        {{{"graph", "convolutional", "networks", ""}}, 3, "gcn"},
+        {{{"graph", "neural", "network", ""}}, 3, "gnn"},
+        {{{"graph", "neural", "networks", ""}}, 3, "gnn"},
+        {{{"large", "language", "model", ""}}, 3, "llm"},
+        {{{"large", "language", "models", ""}}, 3, "llm"},
+        {{{"natural", "language", "processing", ""}}, 3, "nlp"},
+        {{{"recurrent", "neural", "network", ""}}, 3, "rnn"},
+        {{{"recurrent", "neural", "networks", ""}}, 3, "rnn"},
+        {{{"variational", "autoencoder", "", ""}}, 2, "vae"},
+        {{{"variational", "autoencoders", "", ""}}, 2, "vae"},
+    }};
+    for (const F4PhraseAlias& rule : kPhraseAliases) {
+        std::vector<std::string> lhs_tokens;
+        lhs_tokens.reserve(rule.size);
+        for (std::size_t i = 0; i < rule.size; ++i) {
+            lhs_tokens.emplace_back(rule.parts[i]);
+        }
+        add_f4_alias_rule(repo, lhs_tokens, std::string(rule.canonical));
+    }
+}
+
+void load_external_f4_aliases(F4AliasRepository& repo) {
+    const std::filesystem::path alias_path = locate_f4_config_file("f4_aliases.txt");
+    if (alias_path.empty()) {
+        return;
+    }
+
+    std::ifstream in(alias_path);
+    if (!in.is_open()) {
+        return;
+    }
+
+    StringArena parse_arena(16u * 1024u);
+    std::string raw_line;
+    while (std::getline(in, raw_line)) {
+        const std::string_view line = trim_sv(raw_line);
+        if (line.empty() || line.front() == '#') {
+            continue;
+        }
+        const std::size_t sep = line.find("=>");
+        if (sep == std::string_view::npos) {
+            continue;
+        }
+        const std::string_view lhs_raw = trim_sv(line.substr(0, sep));
+        const std::string_view rhs_raw = trim_sv(line.substr(sep + 2));
+        if (lhs_raw.empty() || rhs_raw.empty()) {
+            continue;
+        }
+
+        parse_arena.reset();
+        const std::vector<std::string_view> lhs_sv = Analyzer::normalize_and_tokenize(lhs_raw, parse_arena);
+        if (lhs_sv.empty()) {
+            continue;
+        }
+        const std::vector<std::string_view> rhs_sv = Analyzer::normalize_and_tokenize(rhs_raw, parse_arena);
+        if (rhs_sv.size() != 1) {
+            continue;
+        }
+
+        std::vector<std::string> lhs_tokens;
+        lhs_tokens.reserve(lhs_sv.size());
+        for (const std::string_view token : lhs_sv) {
+            lhs_tokens.emplace_back(token);
+        }
+        add_f4_alias_rule(repo, lhs_tokens, std::string(rhs_sv.front()));
+    }
+}
+
+[[nodiscard]] const F4AliasRepository& get_f4_alias_repository() {
+    static const F4AliasRepository repo = []() {
+        F4AliasRepository built;
+        built.token_alias.reserve(128);
+        built.phrase_alias.reserve(64);
+        load_default_f4_aliases(built);
+        load_external_f4_aliases(built);
+        std::sort(built.phrase_alias.begin(), built.phrase_alias.end(),
+                  [](const F4AliasRepository::PhraseRule& a, const F4AliasRepository::PhraseRule& b) {
+                      if (a.parts.size() != b.parts.size()) {
+                          return a.parts.size() > b.parts.size();
+                      }
+                      return a.parts < b.parts;
+                  });
+        return built;
+    }();
+    return repo;
+}
+
+[[nodiscard]] bool matches_f4_phrase_alias(const std::vector<std::string_view>& terms, std::size_t pos,
+                                           const F4AliasRepository::PhraseRule& rule) noexcept {
+    if (pos + rule.parts.size() > terms.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < rule.parts.size(); ++i) {
+        if (terms[pos + i] != rule.parts[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] std::string_view canonicalize_f4_alias_token(std::string_view token) {
+    const F4AliasRepository& repo = get_f4_alias_repository();
+    const auto it = repo.token_alias.find(token);
+    return it == repo.token_alias.end() ? token : it->second;
+}
+
+void build_f4_canonical_filtered_tokens(const std::vector<std::string_view>& terms,
+                                        std::vector<std::string_view>& out_tokens) {
+    const F4AliasRepository& repo = get_f4_alias_repository();
+    out_tokens.clear();
+    out_tokens.reserve(terms.size());
+    std::size_t i = 0;
+    while (i < terms.size()) {
+        bool aliased = false;
+        for (const F4AliasRepository::PhraseRule& rule : repo.phrase_alias) {
+            if (!matches_f4_phrase_alias(terms, i, rule)) {
+                continue;
+            }
+            if (is_f4_valid_term(rule.canonical)) {
+                out_tokens.push_back(rule.canonical);
+            }
+            i += rule.parts.size();
+            aliased = true;
+            break;
+        }
+        if (aliased) {
+            continue;
+        }
+
+        const std::string_view canonical = canonicalize_f4_alias_token(terms[i]);
+        if (is_f4_valid_term(canonical)) {
+            out_tokens.push_back(canonical);
+        }
+        ++i;
+    }
+}
+
+[[nodiscard]] std::string build_f4_concept_key(std::string_view normalized_term) {
+    std::string key;
+    key.reserve(normalized_term.size());
+    std::size_t i = 0;
+    while (i < normalized_term.size()) {
+        while (i < normalized_term.size() && normalized_term[i] == ' ') {
+            ++i;
+        }
+        if (i >= normalized_term.size()) {
+            break;
+        }
+        const std::size_t beg = i;
+        while (i < normalized_term.size() && normalized_term[i] != ' ') {
+            ++i;
+        }
+        const std::string_view token(normalized_term.data() + beg, i - beg);
+        if (token.empty() || is_f4_noise_token(token)) {
+            continue;
+        }
+        if (!key.empty()) {
+            key.push_back(' ');
+        }
+        key.append(token.data(), token.size());
+    }
+    return key;
+}
+
+[[nodiscard]] std::size_t count_tokens_in_normalized_term(std::string_view normalized_term) noexcept {
+    std::size_t cnt = 0;
+    std::size_t i = 0;
+    while (i < normalized_term.size()) {
+        while (i < normalized_term.size() && normalized_term[i] == ' ') {
+            ++i;
+        }
+        if (i >= normalized_term.size()) {
+            break;
+        }
+        ++cnt;
+        while (i < normalized_term.size() && normalized_term[i] != ' ') {
+            ++i;
+        }
+    }
+    return cnt;
+}
+
+[[nodiscard]] bool prefer_f4_representative_term(std::string_view candidate_term, int candidate_freq,
+                                                 std::string_view current_term, int current_freq) noexcept {
+    const std::size_t c_tok = count_tokens_in_normalized_term(candidate_term);
+    const std::size_t cur_tok = count_tokens_in_normalized_term(current_term);
+    if (c_tok != cur_tok) {
+        return c_tok < cur_tok;
+    }
+    if (candidate_freq != current_freq) {
+        return candidate_freq > current_freq;
+    }
+    if (candidate_term.size() != current_term.size()) {
+        return candidate_term.size() < current_term.size();
+    }
+    return candidate_term < current_term;
+}
+
+[[nodiscard]] std::vector<std::string_view> split_f4_normalized_tokens(std::string_view normalized_term) {
+    std::vector<std::string_view> tokens;
+    tokens.reserve(8);
+    std::size_t i = 0;
+    while (i < normalized_term.size()) {
+        while (i < normalized_term.size() && normalized_term[i] == ' ') {
+            ++i;
+        }
+        if (i >= normalized_term.size()) {
+            break;
+        }
+        const std::size_t beg = i;
+        while (i < normalized_term.size() && normalized_term[i] != ' ') {
+            ++i;
+        }
+        tokens.emplace_back(normalized_term.data() + beg, i - beg);
+    }
+    return tokens;
+}
+
+[[nodiscard]] bool is_f4_redundant_concept(std::string_view a, std::string_view b) {
+    if (a == b) {
+        return true;
+    }
+    const std::vector<std::string_view> ta = split_f4_normalized_tokens(a);
+    const std::vector<std::string_view> tb = split_f4_normalized_tokens(b);
+    if (ta.empty() || tb.empty()) {
+        return false;
+    }
+
+    int intersection = 0;
+    for (const std::string_view lhs : ta) {
+        for (const std::string_view rhs : tb) {
+            if (lhs == rhs) {
+                ++intersection;
+                break;
+            }
+        }
+    }
+    const int min_size = static_cast<int>(std::min(ta.size(), tb.size()));
+    if (intersection == min_size && min_size >= 1) {
+        return true; // subset-like duplication, e.g. "covid" vs "covid pandemic"
+    }
+    const int union_size = static_cast<int>(ta.size() + tb.size()) - intersection;
+    if (intersection >= 2 && union_size > 0) {
+        const double jaccard = static_cast<double>(intersection) / static_cast<double>(union_size);
+        if (jaccard >= 0.70) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool contains_phrase(const std::vector<std::string_view>& tokens,
+                                   const std::vector<std::string_view>& phrase_parts) noexcept {
+    if (phrase_parts.empty() || phrase_parts.size() > tokens.size()) {
+        return false;
+    }
+    const std::size_t m = phrase_parts.size();
+    for (std::size_t i = 0; i + m <= tokens.size(); ++i) {
+        bool match = true;
+        for (std::size_t j = 0; j < m; ++j) {
+            if (tokens[i + j] != phrase_parts[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return true;
+        }
+    }
+    return false;
+}
+
+enum class F5BooleanMode : std::uint8_t { Or = 0, And = 1 };
+enum class F5SortMode : std::uint8_t { Relevance = 0, Newest = 1 };
+
+struct F5QueryPlan {
+    F5BooleanMode boolean_mode = F5BooleanMode::Or;
+    F5SortMode sort_mode = F5SortMode::Relevance;
+    bool fuzzy_enabled = true;
+    int fuzzy_max_edits = 2;
+    std::size_t fuzzy_max_expansions = 4;
+    std::size_t limit = 0;  // 0 means no limit
+    std::size_t offset = 0;
+    std::size_t page = 0;   // 1-based, 0 means disabled
+    std::size_t size = 0;   // page size, 0 means unset
+    std::string terms_query;
+    std::vector<std::vector<std::string>> phrases;
+    std::vector<std::string> prefix_terms;
+    std::vector<std::string> substring_terms;
+};
+
+[[nodiscard]] std::string lowercase_ascii_copy(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (const char ch : s) {
+        const unsigned char uc = static_cast<unsigned char>(ch);
+        if (uc >= 'A' && uc <= 'Z') {
+            out.push_back(static_cast<char>(uc - 'A' + 'a'));
+        } else {
+            out.push_back(ch);
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] bool starts_with_sv(std::string_view text, std::string_view prefix) noexcept {
+    return prefix.size() <= text.size() && text.substr(0, prefix.size()) == prefix;
+}
+
+[[nodiscard]] bool ends_with_sv(std::string_view text, std::string_view suffix) noexcept {
+    return suffix.size() <= text.size() && text.substr(text.size() - suffix.size()) == suffix;
+}
+
+[[nodiscard]] bool contains_sv(std::string_view text, std::string_view needle) noexcept {
+    return text.find(needle) != std::string_view::npos;
+}
+
+[[nodiscard]] std::vector<std::string_view> build_trigrams(std::string_view token) {
+    std::vector<std::string_view> grams;
+    if (token.size() < 3) {
+        return grams;
+    }
+    grams.reserve(token.size() - 2);
+    for (std::size_t i = 0; i + 2 < token.size(); ++i) {
+        grams.push_back(token.substr(i, 3));
+    }
+    return grams;
+}
+
+[[nodiscard]] std::vector<std::string_view> unique_sorted_terms(const std::vector<std::string_view>& in) {
+    std::vector<std::string_view> out = in;
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+[[nodiscard]] bool is_f5_valid_control_token(std::string_view token) {
+    if (token.empty()) {
+        return false;
+    }
+    if (token == "*" || token == "~" || token == "\"" || token == ":" || token == "mode" || token == "sort" ||
+        token == "fuzzy" || token == "fuzzyexp") {
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool parse_f5_nonnegative_int_arg(std::string_view token, std::string_view prefix, std::size_t& out_value) {
+    if (!starts_with_sv(token, prefix)) {
+        return false;
+    }
+    const std::string_view n = token.substr(prefix.size());
+    if (n.empty()) {
+        return false;
+    }
+    std::size_t value = 0;
+    for (const char ch : n) {
+        if (ch < '0' || ch > '9') {
+            return false;
+        }
+        const std::size_t digit = static_cast<std::size_t>(ch - '0');
+        if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10u) {
+            return false;
+        }
+        value = value * 10u + digit;
+    }
+    out_value = value;
+    return true;
+}
+
+struct F1AuthorQueryPlan {
+    bool fuzzy_enabled = true;
+    int fuzzy_max_edits = 2;
+    std::string author_query;
+};
+
+[[nodiscard]] F1AuthorQueryPlan parse_f1_author_query_plan(std::string_view raw_query) {
+    F1AuthorQueryPlan plan;
+    std::size_t i = 0;
+    while (i < raw_query.size()) {
+        while (i < raw_query.size() && std::isspace(static_cast<unsigned char>(raw_query[i])) != 0) {
+            ++i;
+        }
+        if (i >= raw_query.size()) {
+            break;
+        }
+        const std::size_t beg = i;
+        while (i < raw_query.size() && std::isspace(static_cast<unsigned char>(raw_query[i])) == 0) {
+            ++i;
+        }
+        const std::string token(raw_query.substr(beg, i - beg));
+        if (token.empty()) {
+            continue;
+        }
+        const std::string lower = lowercase_ascii_copy(token);
+        if (lower == "fuzzy:off") {
+            plan.fuzzy_enabled = false;
+            continue;
+        }
+        if (lower == "fuzzy:on") {
+            plan.fuzzy_enabled = true;
+            continue;
+        }
+        std::size_t numeric_arg = 0;
+        if (parse_f5_nonnegative_int_arg(lower, "fuzzy:", numeric_arg)) {
+            plan.fuzzy_enabled = true;
+            plan.fuzzy_max_edits = static_cast<int>(std::min<std::size_t>(2, numeric_arg));
+            continue;
+        }
+        if (!plan.author_query.empty()) {
+            plan.author_query.push_back(' ');
+        }
+        plan.author_query.append(token);
+    }
+    return plan;
+}
+
+[[nodiscard]] int bounded_levenshtein_distance(std::string_view a, std::string_view b, int max_dist) {
+    if (max_dist < 0) {
+        return max_dist + 1;
+    }
+    const int n = static_cast<int>(a.size());
+    const int m = static_cast<int>(b.size());
+    if (std::abs(n - m) > max_dist) {
+        return max_dist + 1;
+    }
+    if (n == 0) {
+        return m;
+    }
+    if (m == 0) {
+        return n;
+    }
+
+    std::vector<int> prev(m + 1);
+    std::vector<int> cur(m + 1);
+    for (int j = 0; j <= m; ++j) {
+        prev[j] = j;
+    }
+
+    for (int i = 1; i <= n; ++i) {
+        cur[0] = i;
+        int row_min = cur[0];
+        for (int j = 1; j <= m; ++j) {
+            const int cost = (a[static_cast<std::size_t>(i - 1)] == b[static_cast<std::size_t>(j - 1)]) ? 0 : 1;
+            const int del = prev[j] + 1;
+            const int ins = cur[j - 1] + 1;
+            const int sub = prev[j - 1] + cost;
+            cur[j] = std::min(del, std::min(ins, sub));
+            row_min = std::min(row_min, cur[j]);
+        }
+        if (row_min > max_dist) {
+            return max_dist + 1;
+        }
+        prev.swap(cur);
+    }
+    return prev[m];
+}
+
+[[nodiscard]] float fuzzy_distance_boost(int dist) noexcept {
+    if (dist <= 0) {
+        return 1.0f;
+    }
+    if (dist == 1) {
+        return 0.72f;
+    }
+    if (dist == 2) {
+        return 0.45f;
+    }
+    return 0.25f;
+}
+
+[[nodiscard]] F5QueryPlan parse_f5_query_plan(std::string_view raw_query) {
+    F5QueryPlan plan;
+    bool explicit_mode = false;
+    bool seen_and = false;
+    bool seen_or = false;
+
+    // 1) Extract quoted phrases for phrase boost.
+    StringArena phrase_arena(32u * 1024u);
+    std::size_t i = 0;
+    while (i < raw_query.size()) {
+        if (raw_query[i] != '"') {
+            ++i;
+            continue;
+        }
+        const std::size_t beg = i + 1;
+        const std::size_t ed = raw_query.find('"', beg);
+        if (ed == std::string_view::npos) {
+            break;
+        }
+        const std::string_view phrase_raw = trim_sv(raw_query.substr(beg, ed - beg));
+        if (!phrase_raw.empty()) {
+            const std::vector<std::string_view> phrase_terms = Analyzer::normalize_and_tokenize(phrase_raw, phrase_arena);
+            if (phrase_terms.size() >= 2) {
+                std::vector<std::string> phrase;
+                phrase.reserve(phrase_terms.size());
+                for (const std::string_view t : phrase_terms) {
+                    phrase.emplace_back(t);
+                }
+                plan.phrases.push_back(std::move(phrase));
+            }
+        }
+        i = ed + 1;
+    }
+
+    // 2) Parse control directives + sanitize the term query text.
+    i = 0;
+    while (i < raw_query.size()) {
+        while (i < raw_query.size() && std::isspace(static_cast<unsigned char>(raw_query[i])) != 0) {
+            ++i;
+        }
+        if (i >= raw_query.size()) {
+            break;
+        }
+        const std::size_t beg = i;
+        while (i < raw_query.size() && std::isspace(static_cast<unsigned char>(raw_query[i])) == 0) {
+            ++i;
+        }
+        std::string token(raw_query.substr(beg, i - beg));
+        token.erase(std::remove(token.begin(), token.end(), '"'), token.end());
+        if (token.empty()) {
+            continue;
+        }
+
+        const std::string lower = lowercase_ascii_copy(token);
+        if (lower == "mode:and") {
+            plan.boolean_mode = F5BooleanMode::And;
+            explicit_mode = true;
+            continue;
+        }
+        if (lower == "mode:or") {
+            plan.boolean_mode = F5BooleanMode::Or;
+            explicit_mode = true;
+            continue;
+        }
+        if (lower == "sort:newest") {
+            plan.sort_mode = F5SortMode::Newest;
+            continue;
+        }
+        if (lower == "sort:relevance") {
+            plan.sort_mode = F5SortMode::Relevance;
+            continue;
+        }
+        if (lower == "fuzzy:off") {
+            plan.fuzzy_enabled = false;
+            continue;
+        }
+        if (lower == "fuzzy:on") {
+            plan.fuzzy_enabled = true;
+            continue;
+        }
+        std::size_t numeric_arg = 0;
+        if (parse_f5_nonnegative_int_arg(lower, "fuzzy:", numeric_arg)) {
+            plan.fuzzy_enabled = true;
+            plan.fuzzy_max_edits = static_cast<int>(std::min<std::size_t>(2, numeric_arg));
+            continue;
+        }
+        if (parse_f5_nonnegative_int_arg(lower, "fuzzyexp:", numeric_arg)) {
+            plan.fuzzy_max_expansions = std::max<std::size_t>(1, std::min<std::size_t>(12, numeric_arg));
+            continue;
+        }
+        if (parse_f5_nonnegative_int_arg(lower, "limit:", numeric_arg)) {
+            plan.limit = numeric_arg;
+            continue;
+        }
+        if (parse_f5_nonnegative_int_arg(lower, "offset:", numeric_arg)) {
+            plan.offset = numeric_arg;
+            continue;
+        }
+        if (parse_f5_nonnegative_int_arg(lower, "page:", numeric_arg)) {
+            plan.page = numeric_arg;
+            continue;
+        }
+        if (parse_f5_nonnegative_int_arg(lower, "size:", numeric_arg)) {
+            plan.size = numeric_arg;
+            continue;
+        }
+        if (lower == "and") {
+            seen_and = true;
+            continue;
+        }
+        if (lower == "or") {
+            seen_or = true;
+            continue;
+        }
+
+        if (!lower.empty() && lower.back() == '*') {
+            std::string p = lower.substr(0, lower.size() - 1);
+            if (is_f5_valid_control_token(p)) {
+                plan.prefix_terms.push_back(std::move(p));
+            }
+            continue;
+        }
+        if (lower.size() >= 3 && lower.front() == '~' && lower.back() == '~') {
+            std::string sub = lower.substr(1, lower.size() - 2);
+            if (is_f5_valid_control_token(sub)) {
+                plan.substring_terms.push_back(std::move(sub));
+            }
+            continue;
+        }
+
+        if (!plan.terms_query.empty()) {
+            plan.terms_query.push_back(' ');
+        }
+        plan.terms_query.append(token);
+    }
+
+    if (!explicit_mode) {
+        if (seen_and && !seen_or) {
+            plan.boolean_mode = F5BooleanMode::And;
+        } else {
+            plan.boolean_mode = F5BooleanMode::Or;
+        }
+    }
+    return plan;
+}
+
+[[nodiscard]] bool contains_phrase(const std::vector<std::string_view>& tokens,
+                                   const std::vector<std::string>& phrase_parts) noexcept {
+    if (phrase_parts.empty() || phrase_parts.size() > tokens.size()) {
+        return false;
+    }
+    const std::size_t m = phrase_parts.size();
+    for (std::size_t i = 0; i + m <= tokens.size(); ++i) {
+        bool match = true;
+        for (std::size_t j = 0; j < m; ++j) {
+            if (tokens[i + j] != phrase_parts[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool is_f5_query_stopword(std::string_view token) noexcept {
+    if (token.size() <= 1) {
+        return true;
+    }
+    static constexpr std::array<std::string_view, 26> kStopWords = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "into", "is",
+        "it", "of", "on", "or", "that", "the", "their", "this", "to", "via", "we", "with", "you"};
+    return std::binary_search(kStopWords.begin(), kStopWords.end(), token);
+}
+
+[[nodiscard]] float f5_high_df_penalty(double df_ratio) noexcept {
+    if (df_ratio >= 0.30) {
+        return 0.20f;
+    }
+    if (df_ratio >= 0.15) {
+        return 0.40f;
+    }
+    if (df_ratio >= 0.05) {
+        return 0.65f;
+    }
+    return 1.0f;
+}
+
+constexpr bool kF4FastModeDisableEvidence = true;
+
+} // namespace
+
+bool ExtremeEngine::save_serving_index() const {
+    namespace fs = std::filesystem;
+    const fs::path seg_path = locate_serving_segment_file_path();
+    std::error_code ec;
+    fs::create_directories(seg_path.parent_path(), ec);
+    if (ec) {
+        std::cerr << "[WarmStart] 无法创建服务段目录: " << seg_path.parent_path()
+                  << " | " << ec.message() << '\n';
+        return false;
+    }
+
+    const fs::path tmp_path = seg_path.string() + ".tmp";
+    std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        std::cerr << "[WarmStart] 无法打开服务段临时文件写入: " << tmp_path << '\n';
+        return false;
+    }
+
+    static constexpr std::array<char, 8> kMagic = {'D', 'B', 'L', 'P', 'S', 'V', '2', '\0'};
+    const std::uint32_t version = 1u;
+    out.write(kMagic.data(), static_cast<std::streamsize>(kMagic.size()));
+    out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    out.write(reinterpret_cast<const char*>(&avg_dl_), sizeof(avg_dl_));
+    write_varuint64(out, static_cast<std::uint64_t>(forward_index_.size()));
+
+    for (const Document& doc : forward_index_) {
+        write_varuint32(out, doc.id);
+        write_segment_string(out, doc.title);
+        write_segment_string(out, doc.authors);
+        write_segment_string(out, doc.journal);
+        out.write(reinterpret_cast<const char*>(&doc.year), sizeof(doc.year));
+        write_varuint32(out, doc.doc_length);
+        write_segment_string(out, doc.volume);
+        write_segment_string(out, doc.month);
+        write_segment_string(out, doc.cdrom);
+        write_segment_string(out, doc.ee);
+        write_segment_string(out, doc.url);
+    }
+
+    write_posting_map(out, author_global_);
+    write_posting_map(out, title_exact_global_);
+    write_posting_map(out, keyword_global_);
+
+    write_varuint64(out, static_cast<std::uint64_t>(f5_term_block_meta_.size()));
+    f5_term_block_meta_.for_each([&](const std::string_view& key, const std::vector<F5PostingBlockMeta>& blocks) {
+        write_segment_string(out, key);
+        write_varuint32(out, static_cast<std::uint32_t>(std::min<std::size_t>(blocks.size(), 0xFFFFFFFFu)));
+        for (const F5PostingBlockMeta& b : blocks) {
+            write_varuint32(out, b.end_doc);
+            write_varuint32(out, b.max_tf);
+        }
+    });
+
+    out.flush();
+    out.close();
+    if (!out) {
+        std::cerr << "[WarmStart] 写入服务段失败: " << tmp_path << '\n';
+        return false;
+    }
+
+    fs::rename(tmp_path, seg_path, ec);
+    if (ec) {
+        fs::remove(seg_path, ec);
+        ec.clear();
+        fs::rename(tmp_path, seg_path, ec);
+        if (ec) {
+            fs::remove(tmp_path, ec);
+            std::cerr << "[WarmStart] 无法替换服务段: " << seg_path << '\n';
+            return false;
+        }
+    }
+    std::cout << "[WarmStart] 服务段已保存: " << seg_path << '\n';
+    return true;
+}
+
+const std::vector<Posting>* ExtremeEngine::keyword_postings(const std::string_view term) const noexcept {
+    return keyword_global_.find(term);
+}
+
+const Document* ExtremeEngine::document_at(const DocID doc_id) const noexcept {
+    if (doc_id >= forward_index_.size()) {
+        return nullptr;
+    }
+    return &forward_index_[doc_id];
+}
+
+std::uint32_t ExtremeEngine::doc_length_for(const DocID doc_id) const noexcept {
+    const Document* doc = document_at(doc_id);
+    if (doc == nullptr) {
+        return 1u;
+    }
+    return std::max<std::uint32_t>(1u, doc->doc_length);
+}
+
+bool ExtremeEngine::try_load_serving_index() {
+    namespace fs = std::filesystem;
+    const fs::path seg_path = locate_serving_segment_file_path();
+    std::error_code ec;
+    if (!fs::exists(seg_path, ec) || ec) {
+        return false;
+    }
+
+    std::ifstream in(seg_path, std::ios::binary);
+    if (!in.is_open()) {
+        return false;
+    }
+
+    std::array<char, 8> magic{};
+    in.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+    if (!in || std::string_view(magic.data(), magic.size()) != std::string_view("DBLPSV2\0", 8)) {
+        return false;
+    }
+
+    std::uint32_t version = 0;
+    float loaded_avg_dl = 0.0f;
+    in.read(reinterpret_cast<char*>(&version), sizeof(version));
+    in.read(reinterpret_cast<char*>(&loaded_avg_dl), sizeof(loaded_avg_dl));
+    if (!in || version != 1u) {
+        return false;
+    }
+
+    serving_arena_.reset();
+    segment_term_arena_.reset();
+    local_storage_.clear();
+    forward_index_.clear();
+    author_global_.clear();
+    title_exact_global_.clear();
+    keyword_global_.clear();
+    f5_term_block_meta_.clear();
+
+    std::uint64_t doc_count = 0;
+    if (!read_varuint64(in, doc_count)) {
+        return false;
+    }
+    if (doc_count > static_cast<std::uint64_t>(std::numeric_limits<DocID>::max())) {
+        return false;
+    }
+    forward_index_.reserve(static_cast<std::size_t>(doc_count));
+    for (std::uint64_t i = 0; i < doc_count; ++i) {
+        Document doc;
+        std::uint32_t id = 0;
+        if (!read_varuint32(in, id)) {
+            return false;
+        }
+        doc.id = id;
+        if (!read_segment_string(in, serving_arena_, doc.title) ||
+            !read_segment_string(in, serving_arena_, doc.authors) ||
+            !read_segment_string(in, serving_arena_, doc.journal)) {
+            return false;
+        }
+        in.read(reinterpret_cast<char*>(&doc.year), sizeof(doc.year));
+        if (!read_varuint32(in, doc.doc_length)) {
+            return false;
+        }
+        if (!read_segment_string(in, serving_arena_, doc.volume) ||
+            !read_segment_string(in, serving_arena_, doc.month) ||
+            !read_segment_string(in, serving_arena_, doc.cdrom) ||
+            !read_segment_string(in, serving_arena_, doc.ee) ||
+            !read_segment_string(in, serving_arena_, doc.url)) {
+            return false;
+        }
+        if (!in) {
+            return false;
+        }
+        forward_index_.push_back(doc);
+    }
+
+    if (!read_posting_map(in, serving_arena_, author_global_) ||
+        !read_posting_map(in, serving_arena_, title_exact_global_) ||
+        !read_posting_map(in, segment_term_arena_, keyword_global_)) {
+        return false;
+    }
+
+    std::uint64_t block_term_count = 0;
+    if (!read_varuint64(in, block_term_count)) {
+        return false;
+    }
+    f5_term_block_meta_.reserve_capacity(std::max<std::size_t>(1024, static_cast<std::size_t>(block_term_count) * 2));
+    for (std::uint64_t i = 0; i < block_term_count; ++i) {
+        std::string_view key;
+        if (!read_segment_string(in, segment_term_arena_, key)) {
+            return false;
+        }
+        std::uint32_t block_count = 0;
+        if (!read_varuint32(in, block_count)) {
+            return false;
+        }
+        std::vector<F5PostingBlockMeta> blocks;
+        blocks.reserve(block_count);
+        for (std::uint32_t b = 0; b < block_count; ++b) {
+            std::uint32_t end_doc = 0;
+            std::uint32_t max_tf = 0;
+            if (!read_varuint32(in, end_doc) || !read_varuint32(in, max_tf)) {
+                return false;
+            }
+            blocks.push_back(F5PostingBlockMeta{static_cast<DocID>(end_doc), static_cast<std::uint16_t>(max_tf)});
+        }
+        f5_term_block_meta_[key] = std::move(blocks);
+    }
+
+    if (!in) {
+        return false;
+    }
+
+    avg_dl_ = loaded_avg_dl;
+    scoring_board_.assign(forward_index_.size(), 0.0f);
+    rebuild_f3_top100_cache();
+    rebuild_year_doc_index();
+    rebuild_f4_year_term_cache();
+    rebuild_f1_author_fuzzy_index();
+    rebuild_f5_partial_match_index();
+    f4_top10_cache_.clear();
+    return !forward_index_.empty();
+}
+
+void ExtremeEngine::merge_local_indexes(std::vector<std::unique_ptr<LocalIndex>> locals) {
+    local_storage_ = std::move(locals);
+    forward_index_.clear();
+    author_global_.clear();
+    title_exact_global_.clear();
+    keyword_global_.clear();
+    f1_author_trigram_ids_.clear();
+    f1_author_lexicon_.clear();
+    f1_author_doc_counts_.clear();
+    f1_author_max_doc_count_ = 1;
+    f1_author_fuzzy_cache_.clear();
+    f1_author_fuzzy_cache_fifo_.clear();
+    f5_prefix_term_ids_.clear();
+    f5_trigram_term_ids_.clear();
+    f5_term_block_meta_.clear();
+    f5_term_lexicon_.clear();
+    f5_term_df_.clear();
+    f5_max_term_df_ = 1;
+    f5_hot_term_postings_cache_.clear();
+    f5_hot_term_postings_cache_fifo_.clear();
+    f5_result_cache_.clear();
+    f5_result_cache_fifo_.clear();
+    f5_fuzzy_cache_.clear();
+    f5_fuzzy_cache_fifo_.clear();
+
+    author_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
+    title_exact_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
+    keyword_global_.reserve_capacity(static_cast<std::size_t>(1) << 25);
+
+    std::size_t expected_docs = 0;
+    for (const auto& li : local_storage_) {
+        if (li) {
+            expected_docs += li->forward_index.size();
+        }
+    }
+    const bool keyword_segment_loaded = try_load_f5_keyword_segment(expected_docs);
+
+    std::uint64_t dl_sum = 0;
+
+    for (auto& li : local_storage_) {
+        if (!li) {
+            continue;
+        }
+        const DocID base = static_cast<DocID>(forward_index_.size());
+
+        for (const Document& d : li->forward_index) {
+            Document dg = d;
+            dg.id = static_cast<DocID>(base + d.id);
+            forward_index_.push_back(dg);
+            dl_sum += static_cast<std::uint64_t>(d.doc_length);
+        }
+
+        li->author_inverted.for_each([&](const std::string_view& key, const std::vector<Posting>& vec) {
+            std::vector<Posting>& dest = author_global_[key];
+            for (const Posting& p : vec) {
+                dest.push_back(Posting{static_cast<DocID>(p.doc_id + base), p.tf});
+            }
+        });
+        li->title_exact_inverted.for_each([&](const std::string_view& key, const std::vector<Posting>& vec) {
+            std::vector<Posting>& dest = title_exact_global_[key];
+            for (const Posting& p : vec) {
+                dest.push_back(Posting{static_cast<DocID>(p.doc_id + base), p.tf});
+            }
+        });
+        if (!keyword_segment_loaded) {
+            li->keyword_inverted.for_each([&](const std::string_view& key, const std::vector<Posting>& vec) {
+                std::vector<Posting>& dest = keyword_global_[key];
+                for (const Posting& p : vec) {
+                    dest.push_back(Posting{static_cast<DocID>(p.doc_id + base), p.tf});
+                }
+            });
+        }
+    }
+    if (!keyword_segment_loaded) {
+        save_f5_keyword_segment(forward_index_.size());
+    }
+    rebuild_f3_top100_cache();
+    rebuild_year_doc_index();
+    rebuild_f4_year_term_cache();
+    rebuild_f1_author_fuzzy_index();
+    rebuild_f5_partial_match_index();
+    f4_top10_cache_.clear();
+
+    const std::size_t n = forward_index_.size();
+    avg_dl_ = n > 0 ? static_cast<float>(static_cast<double>(dl_sum) / static_cast<double>(n)) : 0.0f;
+    scoring_board_.assign(n, 0.0f);
+    if (!save_serving_index()) {
+        std::cerr << "[WarmStart] 警告: 服务段保存失败，下次启动仍会回退到 XML 构建。\n";
+    }
+}
+
+void ExtremeEngine::rebuild_author_and_title_inverted_from_forward() {
+    author_global_.clear();
+    title_exact_global_.clear();
+    index_norm_arena_.reset();
+
+    const std::size_t hint = std::max<std::size_t>(8, forward_index_.size() * 8 + 16);
+    author_global_.reserve(hint);
+    title_exact_global_.reserve(hint);
+
+    for (const Document& d : forward_index_) {
+        if (!d.title.empty()) {
+            const std::string_view ts = normalized_span(index_norm_arena_, d.title);
+            if (!ts.empty()) {
+                title_exact_global_[ts].push_back(Posting{d.id, 1u});
+            }
+        }
+        if (!d.authors.empty()) {
+            for_each_author_segment(d.authors, [&](std::string_view aseg) {
+                const std::string_view av = trim_sv(aseg);
+                if (av.empty()) {
+                    return;
+                }
+                const std::string_view nk = normalized_span(index_norm_arena_, av);
+                if (nk.empty()) {
+                    return;
+                }
+                author_global_[nk].push_back(Posting{d.id, 1u});
+            });
+        }
+    }
+}
+
+void ExtremeEngine::rebuild_f1_author_fuzzy_index() {
+    f1_author_trigram_ids_.clear();
+    f1_author_lexicon_.clear();
+    f1_author_doc_counts_.clear();
+    f1_author_max_doc_count_ = 1;
+    f1_author_fuzzy_cache_.clear();
+    f1_author_fuzzy_cache_fifo_.clear();
+
+    if (author_global_.empty()) {
+        return;
+    }
+
+    f1_author_lexicon_.reserve(author_global_.size());
+    std::unordered_map<std::string_view, std::uint32_t> author_df_tmp;
+    author_df_tmp.reserve(author_global_.size() * 2 + 1);
+    author_global_.for_each([&](std::string_view author, const std::vector<Posting>& postings) {
+        if (author.empty()) {
+            return;
+        }
+        f1_author_lexicon_.push_back(author);
+        const std::uint32_t cnt = static_cast<std::uint32_t>(std::min<std::size_t>(postings.size(), 0xFFFFFFFFu));
+        author_df_tmp[author] = cnt;
+        f1_author_max_doc_count_ = std::max(f1_author_max_doc_count_, std::max<std::uint32_t>(1u, cnt));
+    });
+    std::sort(f1_author_lexicon_.begin(), f1_author_lexicon_.end());
+    f1_author_lexicon_.erase(std::unique(f1_author_lexicon_.begin(), f1_author_lexicon_.end()), f1_author_lexicon_.end());
+
+    f1_author_doc_counts_.assign(f1_author_lexicon_.size(), 1u);
+    for (std::size_t i = 0; i < f1_author_lexicon_.size(); ++i) {
+        const auto it = author_df_tmp.find(f1_author_lexicon_[i]);
+        if (it != author_df_tmp.end()) {
+            f1_author_doc_counts_[i] = std::max<std::uint32_t>(1u, it->second);
+        }
+    }
+
+    f1_author_trigram_ids_.reserve_capacity(std::max<std::size_t>(1024, f1_author_lexicon_.size() * 3));
+    for (std::uint32_t i = 0; i < f1_author_lexicon_.size(); ++i) {
+        const std::string_view author = f1_author_lexicon_[i];
+        if (author.size() < 3) {
+            continue;
+        }
+        std::vector<std::string_view> grams = build_trigrams(author);
+        grams = unique_sorted_terms(grams);
+        for (const std::string_view g : grams) {
+            f1_author_trigram_ids_[g].push_back(i);
+        }
+    }
+}
+
+void ExtremeEngine::collect_f1_fuzzy_author_candidates(
+    std::string_view typo, int max_edits, std::vector<std::pair<std::string_view, float>>& out_authors) const {
+    out_authors.clear();
+    if (typo.empty() || typo.size() < 3 || f1_author_lexicon_.empty()) {
+        return;
+    }
+    max_edits = std::min(2, std::max(0, max_edits));
+    const int adaptive_max_edits = static_cast<int>(typo.size()) <= 6 ? std::min(1, max_edits) : max_edits;
+    if (adaptive_max_edits <= 0) {
+        return;
+    }
+
+    auto hydrate_from_cache = [&](const std::vector<std::pair<std::uint32_t, float>>& cache) {
+        out_authors.reserve(cache.size());
+        for (const auto& hit : cache) {
+            if (hit.first >= f1_author_lexicon_.size()) {
+                continue;
+            }
+            out_authors.push_back({f1_author_lexicon_[hit.first], hit.second});
+        }
+    };
+    std::string cache_key;
+    cache_key.reserve(typo.size() + 6);
+    cache_key.push_back(static_cast<char>('0' + adaptive_max_edits));
+    cache_key.push_back(':');
+    cache_key.append(typo.data(), typo.size());
+    if (const auto it = f1_author_fuzzy_cache_.find(cache_key); it != f1_author_fuzzy_cache_.end()) {
+        hydrate_from_cache(it->second);
+        return;
+    }
+
+    std::vector<std::string_view> grams = build_trigrams(typo);
+    grams = unique_sorted_terms(grams);
+    if (grams.empty()) {
+        return;
+    }
+
+    std::vector<const std::vector<std::uint32_t>*> gram_postings;
+    gram_postings.reserve(grams.size());
+    constexpr std::size_t kMaxGramPostingScan = 180000;
+    for (const std::string_view g : grams) {
+        const std::vector<std::uint32_t>* ids = f1_author_trigram_ids_.find(g);
+        if (ids == nullptr || ids->empty()) {
+            continue;
+        }
+        if (ids->size() <= kMaxGramPostingScan) {
+            gram_postings.push_back(ids);
+        }
+    }
+    if (gram_postings.empty()) {
+        return;
+    }
+    std::sort(gram_postings.begin(), gram_postings.end(),
+              [](const std::vector<std::uint32_t>* a, const std::vector<std::uint32_t>* b) {
+                  return a->size() < b->size();
+              });
+    constexpr std::size_t kMaxActiveGrams = 5;
+    if (gram_postings.size() > kMaxActiveGrams) {
+        gram_postings.resize(kMaxActiveGrams);
+    }
+
+    std::unordered_map<std::uint32_t, std::uint16_t> overlap_counts;
+    overlap_counts.reserve(8192);
+    for (const auto* ids : gram_postings) {
+        for (const std::uint32_t aid : *ids) {
+            ++overlap_counts[aid];
+        }
+    }
+    if (overlap_counts.empty()) {
+        return;
+    }
+
+    struct Candidate {
+        std::uint32_t aid = 0;
+        std::uint16_t overlap = 0;
+        std::uint16_t len_diff = 0;
+    };
+    std::vector<Candidate> candidates;
+    candidates.reserve(overlap_counts.size());
+    const std::size_t typo_len = typo.size();
+    const std::uint16_t min_overlap = static_cast<std::uint16_t>(std::max<std::size_t>(1, grams.size() / 3));
+    for (const auto& kv : overlap_counts) {
+        if (kv.first >= f1_author_lexicon_.size()) {
+            continue;
+        }
+        const std::string_view author = f1_author_lexicon_[kv.first];
+        const std::size_t len_diff =
+            typo_len >= author.size() ? (typo_len - author.size()) : (author.size() - typo_len);
+        if (len_diff > static_cast<std::size_t>(adaptive_max_edits + 3)) {
+            continue;
+        }
+        if (kv.second < min_overlap) {
+            continue;
+        }
+        candidates.push_back(
+            Candidate{kv.first, kv.second, static_cast<std::uint16_t>(std::min<std::size_t>(len_diff, 65535u))});
+    }
+    if (candidates.empty()) {
+        return;
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.overlap != b.overlap) {
+            return a.overlap > b.overlap;
+        }
+        if (a.len_diff != b.len_diff) {
+            return a.len_diff < b.len_diff;
+        }
+        return a.aid < b.aid;
+    });
+    constexpr std::size_t kVerifyCap = 160;
+    if (candidates.size() > kVerifyCap) {
+        candidates.resize(kVerifyCap);
+    }
+
+    const float max_df_log = std::log1p(static_cast<float>(std::max<std::uint32_t>(1u, f1_author_max_doc_count_)));
+    std::vector<std::pair<std::uint32_t, float>> cache_hits;
+    cache_hits.reserve(16);
+    for (const Candidate& c : candidates) {
+        const std::string_view author = f1_author_lexicon_[c.aid];
+        const int dist = bounded_levenshtein_distance(typo, author, adaptive_max_edits);
+        if (dist > adaptive_max_edits) {
+            continue;
+        }
+        const float overlap_ratio = static_cast<float>(c.overlap) / static_cast<float>(grams.size());
+        const std::uint32_t prior_cnt = c.aid < f1_author_doc_counts_.size() ? f1_author_doc_counts_[c.aid] : 1u;
+        const float prior_ratio = max_df_log > 0.0f ? (std::log1p(static_cast<float>(prior_cnt)) / max_df_log) : 0.0f;
+        float boost = fuzzy_distance_boost(dist) * (0.76f + 0.24f * overlap_ratio);
+        boost *= (0.88f + 0.24f * std::clamp(prior_ratio, 0.0f, 1.0f));
+        if (starts_with_sv(author, typo)) {
+            boost *= 1.08f;
+        }
+        cache_hits.push_back({c.aid, boost});
+    }
+    if (cache_hits.empty()) {
+        return;
+    }
+    std::sort(cache_hits.begin(), cache_hits.end(),
+              [&](const std::pair<std::uint32_t, float>& a, const std::pair<std::uint32_t, float>& b) {
+                  if (a.second != b.second) {
+                      return a.second > b.second;
+                  }
+                  const std::string_view aa = a.first < f1_author_lexicon_.size() ? f1_author_lexicon_[a.first] : std::string_view{};
+                  const std::string_view bb = b.first < f1_author_lexicon_.size() ? f1_author_lexicon_[b.first] : std::string_view{};
+                  return aa < bb;
+              });
+    constexpr std::size_t kOutCap = 10;
+    if (cache_hits.size() > kOutCap) {
+        cache_hits.resize(kOutCap);
+    }
+
+    while (f1_author_fuzzy_cache_.size() >= k_f1_author_fuzzy_cache_cap && !f1_author_fuzzy_cache_fifo_.empty()) {
+        const std::string evict_key = std::move(f1_author_fuzzy_cache_fifo_.front());
+        f1_author_fuzzy_cache_fifo_.pop_front();
+        f1_author_fuzzy_cache_.erase(evict_key);
+    }
+    f1_author_fuzzy_cache_fifo_.push_back(cache_key);
+    f1_author_fuzzy_cache_[cache_key] = cache_hits;
+    hydrate_from_cache(cache_hits);
+}
+
+bool ExtremeEngine::try_load_f5_keyword_segment(std::size_t expected_doc_count) {
+    namespace fs = std::filesystem;
+    keyword_global_.clear();
+    f5_term_block_meta_.clear();
+    segment_term_arena_.reset();
+
+    const fs::path seg_path = locate_f5_segment_file_path();
+    std::error_code ec;
+    if (!fs::exists(seg_path, ec) || ec) {
+        return false;
+    }
+    std::ifstream in(seg_path, std::ios::binary);
+    if (!in.is_open()) {
+        return false;
+    }
+
+    std::array<char, 8> magic{};
+    in.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+    if (!in || std::string_view(magic.data(), magic.size()) != std::string_view("F5SEGv1\0", 8)) {
+        return false;
+    }
+
+    std::uint32_t version = 0;
+    std::uint64_t doc_count = 0;
+    std::uint64_t term_count = 0;
+    std::uint32_t block_size = 0;
+    in.read(reinterpret_cast<char*>(&version), sizeof(version));
+    in.read(reinterpret_cast<char*>(&doc_count), sizeof(doc_count));
+    in.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
+    in.read(reinterpret_cast<char*>(&block_size), sizeof(block_size));
+    if (!in || version != 1u || block_size != 128u || doc_count != static_cast<std::uint64_t>(expected_doc_count)) {
+        return false;
+    }
+
+    keyword_global_.reserve_capacity(std::max<std::size_t>(1024, static_cast<std::size_t>(term_count) * 2));
+    f5_term_block_meta_.reserve_capacity(std::max<std::size_t>(1024, static_cast<std::size_t>(term_count) * 2));
+
+    std::string term_buf;
+    for (std::uint64_t i = 0; i < term_count; ++i) {
+        std::uint32_t term_len = 0;
+        if (!read_varuint32(in, term_len)) {
+            keyword_global_.clear();
+            f5_term_block_meta_.clear();
+            return false;
+        }
+        term_buf.assign(term_len, '\0');
+        in.read(term_buf.data(), static_cast<std::streamsize>(term_len));
+        if (!in) {
+            keyword_global_.clear();
+            f5_term_block_meta_.clear();
+            return false;
+        }
+        const std::string_view stable_term = segment_term_arena_.store(term_buf);
+
+        std::uint32_t posting_count = 0;
+        if (!read_varuint32(in, posting_count)) {
+            keyword_global_.clear();
+            f5_term_block_meta_.clear();
+            return false;
+        }
+        std::vector<Posting> postings;
+        postings.reserve(posting_count);
+        DocID prev_doc = 0;
+        for (std::uint32_t p = 0; p < posting_count; ++p) {
+            std::uint32_t doc_delta = 0;
+            std::uint32_t tf = 0;
+            if (!read_varuint32(in, doc_delta) || !read_varuint32(in, tf)) {
+                keyword_global_.clear();
+                f5_term_block_meta_.clear();
+                return false;
+            }
+            const DocID did = static_cast<DocID>(prev_doc + doc_delta);
+            postings.push_back(Posting{did, tf});
+            prev_doc = did;
+        }
+        keyword_global_[stable_term] = std::move(postings);
+
+        std::uint32_t block_count = 0;
+        if (!read_varuint32(in, block_count)) {
+            keyword_global_.clear();
+            f5_term_block_meta_.clear();
+            return false;
+        }
+        std::vector<F5PostingBlockMeta> blocks;
+        blocks.reserve(block_count);
+        for (std::uint32_t b = 0; b < block_count; ++b) {
+            std::uint32_t end_doc = 0;
+            std::uint32_t max_tf = 0;
+            if (!read_varuint32(in, end_doc) || !read_varuint32(in, max_tf)) {
+                keyword_global_.clear();
+                f5_term_block_meta_.clear();
+                return false;
+            }
+            blocks.push_back(F5PostingBlockMeta{static_cast<DocID>(end_doc), static_cast<std::uint16_t>(max_tf)});
+        }
+        if (!blocks.empty()) {
+            f5_term_block_meta_[stable_term] = std::move(blocks);
+        }
+    }
+
+    return true;
+}
+
+void ExtremeEngine::save_f5_keyword_segment(std::size_t doc_count) const {
+    namespace fs = std::filesystem;
+    const fs::path seg_path = locate_f5_segment_file_path();
+    std::error_code ec;
+    fs::create_directories(seg_path.parent_path(), ec);
+    if (ec) {
+        return;
+    }
+
+    const fs::path tmp_path = seg_path.string() + ".tmp";
+    std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return;
+    }
+
+    static constexpr std::array<char, 8> kMagic = {'F', '5', 'S', 'E', 'G', 'v', '1', '\0'};
+    const std::uint32_t version = 1u;
+    const std::uint64_t n_docs = static_cast<std::uint64_t>(doc_count);
+    const std::uint64_t n_terms = static_cast<std::uint64_t>(keyword_global_.size());
+    const std::uint32_t block_size = 128u;
+    out.write(kMagic.data(), static_cast<std::streamsize>(kMagic.size()));
+    out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    out.write(reinterpret_cast<const char*>(&n_docs), sizeof(n_docs));
+    out.write(reinterpret_cast<const char*>(&n_terms), sizeof(n_terms));
+    out.write(reinterpret_cast<const char*>(&block_size), sizeof(block_size));
+    if (!out) {
+        return;
+    }
+
+    keyword_global_.for_each([&](const std::string_view& term, const std::vector<Posting>& postings) {
+        write_varuint32(out, static_cast<std::uint32_t>(std::min<std::size_t>(term.size(), 0xFFFFFFFFu)));
+        out.write(term.data(), static_cast<std::streamsize>(term.size()));
+
+        write_varuint32(out, static_cast<std::uint32_t>(std::min<std::size_t>(postings.size(), 0xFFFFFFFFu)));
+        DocID prev_doc = 0;
+        std::vector<F5PostingBlockMeta> blocks;
+        blocks.reserve((postings.size() + block_size - 1u) / block_size);
+        std::uint16_t cur_block_max_tf = 0;
+        std::size_t cur_block_start = 0;
+        for (std::size_t i = 0; i < postings.size(); ++i) {
+            const Posting& p = postings[i];
+            const std::uint32_t delta = static_cast<std::uint32_t>(p.doc_id - prev_doc);
+            write_varuint32(out, delta);
+            write_varuint32(out, p.tf);
+            prev_doc = p.doc_id;
+
+            if (i == cur_block_start) {
+                cur_block_max_tf = static_cast<std::uint16_t>(std::min<std::uint32_t>(p.tf, 0xFFFFu));
+            } else {
+                cur_block_max_tf = std::max<std::uint16_t>(cur_block_max_tf, static_cast<std::uint16_t>(std::min<std::uint32_t>(p.tf, 0xFFFFu)));
+            }
+            const bool block_end = ((i + 1u) % block_size == 0u) || (i + 1u == postings.size());
+            if (block_end) {
+                blocks.push_back(F5PostingBlockMeta{p.doc_id, cur_block_max_tf});
+                cur_block_start = i + 1u;
+            }
+        }
+
+        write_varuint32(out, static_cast<std::uint32_t>(std::min<std::size_t>(blocks.size(), 0xFFFFFFFFu)));
+        for (const F5PostingBlockMeta& b : blocks) {
+            write_varuint32(out, static_cast<std::uint32_t>(b.end_doc));
+            write_varuint32(out, static_cast<std::uint32_t>(b.max_tf));
+        }
+    });
+
+    out.flush();
+    out.close();
+    if (!out) {
+        return;
+    }
+    fs::rename(tmp_path, seg_path, ec);
+    if (ec) {
+        fs::remove(seg_path, ec);
+        ec.clear();
+        fs::rename(tmp_path, seg_path, ec);
+        if (ec) {
+            fs::remove(tmp_path, ec);
+        }
+    }
+}
+
+void ExtremeEngine::rebuild_f5_partial_match_index() {
+    f5_prefix_term_ids_.clear();
+    f5_trigram_term_ids_.clear();
+    f5_term_lexicon_.clear();
+    f5_term_df_.clear();
+    f5_max_term_df_ = 1;
+    f5_hot_term_postings_cache_.clear();
+    f5_hot_term_postings_cache_fifo_.clear();
+    f5_result_cache_.clear();
+    f5_result_cache_fifo_.clear();
+    f5_fuzzy_cache_.clear();
+    f5_fuzzy_cache_fifo_.clear();
+
+    if (keyword_global_.empty()) {
+        return;
+    }
+
+    f5_term_lexicon_.reserve(keyword_global_.size());
+    std::unordered_map<std::string_view, std::uint32_t> term_df_tmp;
+    term_df_tmp.reserve(keyword_global_.size() * 2 + 1);
+    keyword_global_.for_each([&](std::string_view term, const std::vector<Posting>& postings) {
+        if (term.empty()) {
+            return;
+        }
+        f5_term_lexicon_.push_back(term);
+        const std::uint32_t df = static_cast<std::uint32_t>(std::min<std::size_t>(postings.size(), 0xFFFFFFFFu));
+        term_df_tmp[term] = df;
+        f5_max_term_df_ = std::max(f5_max_term_df_, df);
+    });
+    std::sort(f5_term_lexicon_.begin(), f5_term_lexicon_.end());
+    f5_term_lexicon_.erase(std::unique(f5_term_lexicon_.begin(), f5_term_lexicon_.end()), f5_term_lexicon_.end());
+    f5_term_df_.assign(f5_term_lexicon_.size(), 1u);
+    for (std::size_t i = 0; i < f5_term_lexicon_.size(); ++i) {
+        const auto it = term_df_tmp.find(f5_term_lexicon_[i]);
+        if (it != term_df_tmp.end()) {
+            f5_term_df_[i] = std::max<std::uint32_t>(1u, it->second);
+        }
+    }
+
+    f5_prefix_term_ids_.reserve_capacity(std::max<std::size_t>(1024, f5_term_lexicon_.size() * 2));
+    f5_trigram_term_ids_.reserve_capacity(std::max<std::size_t>(1024, f5_term_lexicon_.size() * 4));
+
+    for (std::uint32_t i = 0; i < f5_term_lexicon_.size(); ++i) {
+        const std::string_view term = f5_term_lexicon_[i];
+        const std::size_t plen = std::min<std::size_t>(k_f5_prefix_index_len, term.size());
+        if (plen > 0) {
+            const std::string_view pfx = term.substr(0, plen);
+            f5_prefix_term_ids_[pfx].push_back(i);
+        }
+        if (term.size() >= 3) {
+            std::vector<std::string_view> grams = build_trigrams(term);
+            grams = unique_sorted_terms(grams);
+            for (const std::string_view g : grams) {
+                f5_trigram_term_ids_[g].push_back(i);
+            }
+        }
+    }
+}
+
+void ExtremeEngine::collect_f5_prefix_candidates(std::string_view prefix, std::vector<std::string_view>& out_terms) const {
+    out_terms.clear();
+    if (prefix.empty() || f5_term_lexicon_.empty()) {
+        return;
+    }
+
+    if (prefix.size() < k_f5_prefix_index_len) {
+        const auto lo = std::lower_bound(f5_term_lexicon_.begin(), f5_term_lexicon_.end(), prefix);
+        for (auto it = lo; it != f5_term_lexicon_.end(); ++it) {
+            if (!starts_with_sv(*it, prefix)) {
+                break;
+            }
+            out_terms.push_back(*it);
+        }
+        return;
+    }
+
+    const std::string_view gate = prefix.substr(0, k_f5_prefix_index_len);
+    const std::vector<std::uint32_t>* ids = f5_prefix_term_ids_.find(gate);
+    if (ids == nullptr) {
+        return;
+    }
+    out_terms.reserve(ids->size());
+    for (const std::uint32_t tid : *ids) {
+        if (tid >= f5_term_lexicon_.size()) {
+            continue;
+        }
+        const std::string_view term = f5_term_lexicon_[tid];
+        if (starts_with_sv(term, prefix)) {
+            out_terms.push_back(term);
+        }
+    }
+}
+
+void ExtremeEngine::collect_f5_substring_candidates(std::string_view needle, std::vector<std::string_view>& out_terms) const {
+    out_terms.clear();
+    if (needle.empty() || f5_term_lexicon_.empty()) {
+        return;
+    }
+
+    if (needle.size() < 3) {
+        for (const std::string_view term : f5_term_lexicon_) {
+            if (contains_sv(term, needle)) {
+                out_terms.push_back(term);
+            }
+        }
+        return;
+    }
+
+    std::vector<std::string_view> grams = build_trigrams(needle);
+    grams = unique_sorted_terms(grams);
+    if (grams.empty()) {
+        return;
+    }
+
+    std::vector<const std::vector<std::uint32_t>*> gram_postings;
+    gram_postings.reserve(grams.size());
+    for (const std::string_view g : grams) {
+        const std::vector<std::uint32_t>* ids = f5_trigram_term_ids_.find(g);
+        if (ids == nullptr || ids->empty()) {
+            return;
+        }
+        gram_postings.push_back(ids);
+    }
+    std::sort(gram_postings.begin(), gram_postings.end(),
+              [](const std::vector<std::uint32_t>* a, const std::vector<std::uint32_t>* b) {
+                  return a->size() < b->size();
+              });
+
+    std::vector<std::uint32_t> candidate_ids = *gram_postings.front();
+    for (std::size_t gi = 1; gi < gram_postings.size(); ++gi) {
+        const std::vector<std::uint32_t>& ids = *gram_postings[gi];
+        std::vector<std::uint32_t> inter;
+        inter.reserve(std::min(candidate_ids.size(), ids.size()));
+        std::size_t a = 0;
+        std::size_t b = 0;
+        while (a < candidate_ids.size() && b < ids.size()) {
+            if (candidate_ids[a] == ids[b]) {
+                inter.push_back(candidate_ids[a]);
+                ++a;
+                ++b;
+            } else if (candidate_ids[a] < ids[b]) {
+                ++a;
+            } else {
+                ++b;
+            }
+        }
+        candidate_ids.swap(inter);
+        if (candidate_ids.empty()) {
+            return;
+        }
+    }
+
+    for (const std::uint32_t tid : candidate_ids) {
+        if (tid >= f5_term_lexicon_.size()) {
+            continue;
+        }
+        const std::string_view term = f5_term_lexicon_[tid];
+        if (contains_sv(term, needle)) {
+            out_terms.push_back(term);
+        }
+    }
+}
+
+void ExtremeEngine::collect_f5_fuzzy_candidates(
+    std::string_view typo, int max_edits, std::vector<std::pair<std::string_view, float>>& out_terms) const {
+    out_terms.clear();
+    if (typo.empty() || typo.size() < 3 || f5_term_lexicon_.empty()) {
+        return;
+    }
+    if (max_edits < 0) {
+        return;
+    }
+    max_edits = std::min(2, max_edits);
+    const int adaptive_max_edits = static_cast<int>(typo.size()) <= 5 ? std::min(1, max_edits) : max_edits;
+    if (adaptive_max_edits <= 0) {
+        return;
+    }
+
+    auto hydrate_out_from_cached = [&](const std::vector<std::pair<std::uint32_t, float>>& cached) {
+        out_terms.reserve(cached.size());
+        for (const auto& hit : cached) {
+            if (hit.first >= f5_term_lexicon_.size()) {
+                continue;
+            }
+            out_terms.push_back({f5_term_lexicon_[hit.first], hit.second});
+        }
+    };
+    std::string cache_key;
+    cache_key.reserve(typo.size() + 6);
+    cache_key.push_back(static_cast<char>('0' + adaptive_max_edits));
+    cache_key.push_back(':');
+    cache_key.append(typo.data(), typo.size());
+    if (const auto it = f5_fuzzy_cache_.find(cache_key); it != f5_fuzzy_cache_.end()) {
+        hydrate_out_from_cached(it->second);
+        return;
+    }
+
+    std::vector<std::string_view> grams = build_trigrams(typo);
+    grams = unique_sorted_terms(grams);
+    if (grams.empty()) {
+        return;
+    }
+
+    std::vector<const std::vector<std::uint32_t>*> gram_postings;
+    gram_postings.reserve(grams.size());
+    constexpr std::size_t kMaxGramPostingScan = 200000;
+    for (const std::string_view g : grams) {
+        const std::vector<std::uint32_t>* ids = f5_trigram_term_ids_.find(g);
+        if (ids == nullptr || ids->empty()) {
+            continue;
+        }
+        if (ids->size() <= kMaxGramPostingScan) {
+            gram_postings.push_back(ids);
+        }
+    }
+    if (gram_postings.empty()) {
+        return;
+    }
+    std::sort(gram_postings.begin(), gram_postings.end(),
+              [](const std::vector<std::uint32_t>* a, const std::vector<std::uint32_t>* b) {
+                  return a->size() < b->size();
+              });
+    constexpr std::size_t kMaxActiveGrams = 4;
+    if (gram_postings.size() > kMaxActiveGrams) {
+        gram_postings.resize(kMaxActiveGrams);
+    }
+
+    std::unordered_map<std::uint32_t, std::uint16_t> overlap_counts;
+    overlap_counts.reserve(8192);
+    for (const auto* ids : gram_postings) {
+        for (const std::uint32_t tid : *ids) {
+            ++overlap_counts[tid];
+        }
+    }
+    if (overlap_counts.empty()) {
+        return;
+    }
+
+    struct FuzzyCandidate {
+        std::uint32_t tid = 0;
+        std::uint16_t overlap = 0;
+        std::uint16_t len_diff = 0;
+    };
+    std::vector<FuzzyCandidate> candidates;
+    candidates.reserve(overlap_counts.size());
+    const std::size_t typo_len = typo.size();
+    const std::uint16_t min_overlap = static_cast<std::uint16_t>(std::max<std::size_t>(1, grams.size() / 3));
+    for (const auto& kv : overlap_counts) {
+        if (kv.first >= f5_term_lexicon_.size()) {
+            continue;
+        }
+        const std::string_view term = f5_term_lexicon_[kv.first];
+        const std::size_t len_diff =
+            typo_len >= term.size() ? (typo_len - term.size()) : (term.size() - typo_len);
+        if (len_diff > static_cast<std::size_t>(adaptive_max_edits + 2)) {
+            continue;
+        }
+        if (kv.second < min_overlap) {
+            continue;
+        }
+        candidates.push_back(FuzzyCandidate{
+            kv.first, kv.second, static_cast<std::uint16_t>(std::min<std::size_t>(len_diff, 65535u))});
+    }
+    if (candidates.empty()) {
+        return;
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const FuzzyCandidate& a, const FuzzyCandidate& b) {
+        if (a.overlap != b.overlap) {
+            return a.overlap > b.overlap;
+        }
+        if (a.len_diff != b.len_diff) {
+            return a.len_diff < b.len_diff;
+        }
+        return a.tid < b.tid;
+    });
+    constexpr std::size_t kVerifyCap = 128;
+    if (candidates.size() > kVerifyCap) {
+        candidates.resize(kVerifyCap);
+    }
+
+    std::vector<std::pair<std::uint32_t, float>> cached_hits;
+    cached_hits.reserve(24);
+    const float max_df_log = std::log1p(static_cast<float>(std::max<std::uint32_t>(1u, f5_max_term_df_)));
+    for (const FuzzyCandidate& c : candidates) {
+        const std::string_view term = f5_term_lexicon_[c.tid];
+        const int dist = bounded_levenshtein_distance(typo, term, adaptive_max_edits);
+        if (dist > adaptive_max_edits) {
+            continue;
+        }
+        const float overlap_ratio = static_cast<float>(c.overlap) / static_cast<float>(grams.size());
+        const std::uint32_t df = c.tid < f5_term_df_.size() ? f5_term_df_[c.tid] : 1u;
+        const float prior_ratio = max_df_log > 0.0f ? (std::log1p(static_cast<float>(df)) / max_df_log) : 0.0f;
+        const float prior_factor = 0.90f + 0.20f * std::clamp(prior_ratio, 0.0f, 1.0f);
+        const float boost = fuzzy_distance_boost(dist) * (0.80f + 0.20f * overlap_ratio) * prior_factor;
+        cached_hits.push_back({c.tid, boost});
+    }
+
+    std::sort(cached_hits.begin(), cached_hits.end(),
+              [&](const std::pair<std::uint32_t, float>& a, const std::pair<std::uint32_t, float>& b) {
+                  if (a.second != b.second) {
+                      return a.second > b.second;
+                  }
+                  const std::string_view ta = a.first < f5_term_lexicon_.size() ? f5_term_lexicon_[a.first] : std::string_view{};
+                  const std::string_view tb = b.first < f5_term_lexicon_.size() ? f5_term_lexicon_[b.first] : std::string_view{};
+                  return ta < tb;
+              });
+    constexpr std::size_t kOutCap = 24;
+    if (cached_hits.size() > kOutCap) {
+        cached_hits.resize(kOutCap);
+    }
+
+    if (f5_fuzzy_cache_.find(cache_key) == f5_fuzzy_cache_.end()) {
+        while (f5_fuzzy_cache_.size() >= k_f5_fuzzy_cache_cap && !f5_fuzzy_cache_fifo_.empty()) {
+            const std::string evict_key = std::move(f5_fuzzy_cache_fifo_.front());
+            f5_fuzzy_cache_fifo_.pop_front();
+            f5_fuzzy_cache_.erase(evict_key);
+        }
+        f5_fuzzy_cache_fifo_.push_back(cache_key);
+        f5_fuzzy_cache_.emplace(cache_key, cached_hits);
+    }
+
+    if (const auto it = f5_fuzzy_cache_.find(cache_key); it != f5_fuzzy_cache_.end()) {
+        hydrate_out_from_cached(it->second);
+    }
+}
+
+namespace {
+
+[[nodiscard]] std::uint32_t posting_list_max_tf(const std::vector<Posting>& postings) noexcept {
+    std::uint32_t max_tf = 1u;
+    for (const Posting& po : postings) {
+        max_tf = std::max(max_tf, po.tf);
+    }
+    return max_tf;
+}
+
+} // namespace
+
+bool ExtremeEngine::build_f5_daat_terms(
+    const std::vector<std::pair<std::string_view, float>>& query_terms, const bool require_all_terms,
+    std::vector<F5DaatTermState>& terms, F5SearchProfile* profile) const {
+    terms.clear();
+    terms.reserve(query_terms.size());
+    const std::size_t corpus_size = forward_index_.size();
+
+    for (const auto& qt : query_terms) {
+        const std::vector<Posting>* plist = keyword_postings(qt.first);
+        if (plist == nullptr || plist->empty()) {
+            if (require_all_terms) {
+                return false;
+            }
+            continue;
+        }
+        F5DaatTermState st;
+        st.postings = plist;
+        const double N = static_cast<double>(corpus_size);
+        const double df = static_cast<double>(plist->size());
+        const double df_ratio = df / N;
+        const float penalty = f5_high_df_penalty(df_ratio) * (is_f5_query_stopword(qt.first) ? 0.35f : 1.0f);
+        st.idf = static_cast<float>(std::log((N - df + 0.5) / (df + 0.5) + 1.0)) * penalty * qt.second;
+        const std::uint32_t max_tf = posting_list_max_tf(*plist);
+        const float K = k_bm25_k1 * (1.0f - k_bm25_b);
+        const float tf = static_cast<float>(std::max<std::uint32_t>(1u, max_tf));
+        st.max_score = st.idf * (tf * (k_bm25_k1 + 1.0f)) / (tf + K);
+        terms.push_back(st);
+    }
+
+    if (terms.empty()) {
+        return false;
+    }
+    if (profile != nullptr) {
+        profile->matched_query_terms = terms.size();
+    }
+    return true;
+}
+
+[[nodiscard]] bool ExtremeEngine::daat_term_exhausted(const F5DaatTermState& st) const noexcept {
+    return st.postings == nullptr || st.pos >= st.postings->size();
+}
+
+[[nodiscard]] DocID ExtremeEngine::daat_term_current_doc(const F5DaatTermState& st) const noexcept {
+    if (daat_term_exhausted(st)) {
+        return static_cast<DocID>(-1);
+    }
+    return (*st.postings)[st.pos].doc_id;
+}
+
+void ExtremeEngine::daat_term_advance(F5DaatTermState& st) const noexcept {
+    if (!daat_term_exhausted(st)) {
+        ++st.pos;
+    }
+}
+
+void ExtremeEngine::daat_term_skip_to(F5DaatTermState& st, const DocID target) const noexcept {
+    if (st.postings == nullptr) {
+        return;
+    }
+    while (st.pos < st.postings->size() && (*st.postings)[st.pos].doc_id < target) {
+        ++st.pos;
+    }
+}
+
+std::size_t ExtremeEngine::count_or_union_docs(std::vector<F5DaatTermState>& terms) const {
+    constexpr DocID kInvalidDocId = static_cast<DocID>(-1);
+    std::size_t hits = 0;
+    while (true) {
+        DocID min_doc = kInvalidDocId;
+        for (F5DaatTermState& st : terms) {
+            if (daat_term_exhausted(st)) {
+                continue;
+            }
+            const DocID doc = daat_term_current_doc(st);
+            if (min_doc == kInvalidDocId || doc < min_doc) {
+                min_doc = doc;
+            }
+        }
+        if (min_doc == kInvalidDocId) {
+            break;
+        }
+        ++hits;
+        for (F5DaatTermState& st : terms) {
+            while (!daat_term_exhausted(st) && daat_term_current_doc(st) == min_doc) {
+                daat_term_advance(st);
+            }
+        }
+    }
+    for (F5DaatTermState& st : terms) {
+        st.pos = 0;
+    }
+    return hits;
+}
+
+void ExtremeEngine::sort_f5_daat_results(std::vector<std::pair<float, DocID>>& ordered) const {
+    std::sort(ordered.begin(), ordered.end(), [&](const std::pair<float, DocID>& a, const std::pair<float, DocID>& b) {
+        if (a.first != b.first) {
+            return a.first > b.first;
+        }
+        const Document* da = document_at(a.second);
+        const Document* db = document_at(b.second);
+        const int ya = da != nullptr ? da->year : 0;
+        const int yb = db != nullptr ? db->year : 0;
+        if (ya != yb) {
+            return ya > yb;
+        }
+        return a.second < b.second;
+    });
+}
+
+bool ExtremeEngine::daat_wand_or_topk(
+    std::vector<F5DaatTermState>& terms, const std::size_t requested_topk,
+    std::vector<std::pair<float, DocID>>& ordered, std::size_t& total_hits, F5SearchProfile* profile) const {
+    constexpr DocID kInvalidDocId = static_cast<DocID>(-1);
+    ordered.clear();
+    if (terms.size() == 1 && terms.front().postings != nullptr) {
+        total_hits = terms.front().postings->size();
+    } else {
+        total_hits = count_or_union_docs(terms);
+    }
+    if (total_hits == 0 || requested_topk == 0) {
+        return false;
+    }
+
+    std::sort(terms.begin(), terms.end(),
+              [](const F5DaatTermState& a, const F5DaatTermState& b) { return a.max_score < b.max_score; });
+
+    using ScoreDoc = std::pair<float, DocID>;
+    std::priority_queue<ScoreDoc, std::vector<ScoreDoc>, std::greater<ScoreDoc>> heap;
+    float threshold = 0.0f;
+    const float avdl = avg_dl_ > 0.0f ? avg_dl_ : 1.0f;
+
+    while (true) {
+        std::vector<std::size_t> order;
+        order.reserve(terms.size());
+        for (std::size_t i = 0; i < terms.size(); ++i) {
+            if (!daat_term_exhausted(terms[i])) {
+                order.push_back(i);
+            }
+        }
+        if (order.empty()) {
+            break;
+        }
+
+        std::sort(order.begin(), order.end(), [&](const std::size_t a, const std::size_t b) {
+            const DocID da = daat_term_current_doc(terms[a]);
+            const DocID db = daat_term_current_doc(terms[b]);
+            if (da != db) {
+                return da < db;
+            }
+            return terms[a].max_score > terms[b].max_score;
+        });
+
+        float bound = 0.0f;
+        std::size_t pivot_order_idx = order.size();
+        for (std::size_t oi = 0; oi < order.size(); ++oi) {
+            bound += terms[order[oi]].max_score;
+            if (bound > threshold) {
+                pivot_order_idx = oi;
+                break;
+            }
+        }
+        if (pivot_order_idx >= order.size()) {
+            if (profile != nullptr) {
+                profile->blocks_pruned += 1;
+            }
+            break;
+        }
+
+        const DocID pivot_doc = daat_term_current_doc(terms[order[pivot_order_idx]]);
+        if (pivot_doc == kInvalidDocId) {
+            break;
+        }
+
+        bool pivot_is_candidate = true;
+        for (std::size_t oi = 0; oi <= pivot_order_idx; ++oi) {
+            if (daat_term_current_doc(terms[order[oi]]) != pivot_doc) {
+                pivot_is_candidate = false;
+                break;
+            }
+        }
+
+        if (pivot_is_candidate) {
+            float score = 0.0f;
+            for (F5DaatTermState& st : terms) {
+                if (daat_term_exhausted(st)) {
+                    continue;
+                }
+                daat_term_skip_to(st, pivot_doc);
+                if (daat_term_exhausted(st) || daat_term_current_doc(st) != pivot_doc) {
+                    continue;
+                }
+                const Posting& po = (*st.postings)[st.pos];
+                const float dl = static_cast<float>(doc_length_for(po.doc_id));
+                const float K = k_bm25_k1 * ((1.0f - k_bm25_b) + k_bm25_b * (dl / avdl));
+                const float tf = static_cast<float>(po.tf);
+                score += st.idf * (tf * (k_bm25_k1 + 1.0f)) / (tf + K);
+                if (profile != nullptr) {
+                    profile->postings_scored += 1;
+                }
+            }
+            if (profile != nullptr) {
+                profile->docs_touched += 1;
+            }
+            if (heap.size() < requested_topk) {
+                heap.push({score, pivot_doc});
+                if (heap.size() == requested_topk) {
+                    threshold = heap.top().first;
+                }
+            } else if (score > threshold || (score == threshold && pivot_doc < heap.top().second)) {
+                heap.pop();
+                heap.push({score, pivot_doc});
+                threshold = heap.top().first;
+            }
+        }
+
+        if (pivot_is_candidate) {
+            for (F5DaatTermState& st : terms) {
+                if (!daat_term_exhausted(st) && daat_term_current_doc(st) == pivot_doc) {
+                    daat_term_advance(st);
+                }
+            }
+        } else {
+            for (std::size_t oi = 0; oi < pivot_order_idx; ++oi) {
+                daat_term_skip_to(terms[order[oi]], pivot_doc);
+            }
+        }
+    }
+
+    if (heap.empty()) {
+        return false;
+    }
+
+    ordered.reserve(heap.size());
+    while (!heap.empty()) {
+        ordered.push_back(heap.top());
+        heap.pop();
+    }
+    sort_f5_daat_results(ordered);
+    return true;
+}
+
+bool ExtremeEngine::daat_wand_and_topk(
+    std::vector<F5DaatTermState>& terms, const std::size_t requested_topk,
+    std::vector<std::pair<float, DocID>>& ordered, std::size_t& total_hits, F5SearchProfile* profile) const {
+    constexpr DocID kInvalidDocId = static_cast<DocID>(-1);
+    ordered.clear();
+    total_hits = 0;
+    if (requested_topk == 0) {
+        return false;
+    }
+
+    std::sort(terms.begin(), terms.end(), [](const F5DaatTermState& a, const F5DaatTermState& b) {
+        if (a.postings == nullptr) {
+            return false;
+        }
+        if (b.postings == nullptr) {
+            return true;
+        }
+        return a.postings->size() < b.postings->size();
+    });
+
+    using ScoreDoc = std::pair<float, DocID>;
+    std::priority_queue<ScoreDoc, std::vector<ScoreDoc>, std::greater<ScoreDoc>> heap;
+    float threshold = 0.0f;
+    const float avdl = avg_dl_ > 0.0f ? avg_dl_ : 1.0f;
+
+    while (true) {
+        DocID pivot_doc = kInvalidDocId;
+        std::size_t pivot_idx = 0;
+        for (std::size_t i = 0; i < terms.size(); ++i) {
+            if (!daat_term_exhausted(terms[i])) {
+                pivot_doc = daat_term_current_doc(terms[i]);
+                pivot_idx = i;
+                break;
+            }
+        }
+        if (pivot_doc == kInvalidDocId) {
+            break;
+        }
+
+        for (F5DaatTermState& st : terms) {
+            daat_term_skip_to(st, pivot_doc);
+        }
+
+        bool aligned = true;
+        for (const F5DaatTermState& st : terms) {
+            if (daat_term_exhausted(st) || daat_term_current_doc(st) != pivot_doc) {
+                aligned = false;
+                break;
+            }
+        }
+
+        if (aligned) {
+            float score = 0.0f;
+            for (F5DaatTermState& st : terms) {
+                const Posting& po = (*st.postings)[st.pos];
+                const float dl = static_cast<float>(doc_length_for(po.doc_id));
+                const float K = k_bm25_k1 * ((1.0f - k_bm25_b) + k_bm25_b * (dl / avdl));
+                const float tf = static_cast<float>(po.tf);
+                score += st.idf * (tf * (k_bm25_k1 + 1.0f)) / (tf + K);
+                if (profile != nullptr) {
+                    profile->postings_scored += 1;
+                }
+            }
+            ++total_hits;
+            if (profile != nullptr) {
+                profile->docs_touched += 1;
+            }
+            if (heap.size() < requested_topk) {
+                heap.push({score, pivot_doc});
+                if (heap.size() == requested_topk) {
+                    threshold = heap.top().first;
+                }
+            } else if (score > threshold || (score == threshold && pivot_doc < heap.top().second)) {
+                heap.pop();
+                heap.push({score, pivot_doc});
+                threshold = heap.top().first;
+            }
+        }
+
+        daat_term_advance(terms[pivot_idx]);
+    }
+
+    if (heap.empty()) {
+        total_hits = 0;
+        return false;
+    }
+
+    ordered.reserve(heap.size());
+    while (!heap.empty()) {
+        ordered.push_back(heap.top());
+        heap.pop();
+    }
+    sort_f5_daat_results(ordered);
+    return true;
+}
+
+bool ExtremeEngine::try_search_f5_daat_wand(
+    const std::vector<std::pair<std::string_view, float>>& terms, const bool require_all_terms,
+    const std::size_t requested_topk, std::vector<std::pair<float, DocID>>& ordered, std::size_t& total_hits,
+    F5SearchProfile* profile) const {
+    ordered.clear();
+    total_hits = 0;
+    if (terms.empty() || requested_topk == 0 || forward_index_.empty()) {
+        return false;
+    }
+
+    std::vector<F5DaatTermState> daat_terms;
+    if (!build_f5_daat_terms(terms, require_all_terms, daat_terms, profile)) {
+        return false;
+    }
+
+    if (require_all_terms) {
+        return daat_wand_and_topk(daat_terms, requested_topk, ordered, total_hits, profile);
+    }
+    return daat_wand_or_topk(daat_terms, requested_topk, ordered, total_hits, profile);
+}
+
+bool ExtremeEngine::try_search_f5_newest_year(
+    const std::vector<std::pair<std::string_view, float>>& terms, const bool require_all_terms,
+    const std::size_t requested_topk, std::vector<std::pair<float, DocID>>& ordered, std::size_t& total_hits,
+    F5SearchProfile* profile) const {
+    ordered.clear();
+    total_hits = 0;
+    if (terms.empty() || requested_topk == 0 || forward_index_.empty() || year_doc_index_.empty()) {
+        return false;
+    }
+
+    struct NewestTerm {
+        std::string_view term;
+        const std::vector<Posting>* postings = nullptr;
+        float idf = 0.0f;
+    };
+
+    const double N = static_cast<double>(forward_index_.size());
+    std::vector<NewestTerm> states;
+    states.reserve(terms.size());
+    std::vector<std::uint16_t> doc_hits(forward_index_.size(), 0u);
+    std::vector<DocID> touched_docs;
+    touched_docs.reserve(4096);
+
+    for (const auto& q : terms) {
+        const std::vector<Posting>* plist = keyword_postings(q.first);
+        if (plist == nullptr || plist->empty()) {
+            if (require_all_terms) {
+                return false;
+            }
+            continue;
+        }
+        const double df = static_cast<double>(plist->size());
+        const double df_ratio = df / N;
+        const float penalty = f5_high_df_penalty(df_ratio) * (is_f5_query_stopword(q.first) ? 0.35f : 1.0f);
+        const float idf = static_cast<float>(std::log((N - df + 0.5) / (df + 0.5) + 1.0)) * penalty * q.second;
+        states.push_back(NewestTerm{q.first, plist, idf});
+        if (profile != nullptr) {
+            profile->postings_visited += plist->size();
+        }
+        for (const Posting& po : *plist) {
+            if (po.doc_id >= doc_hits.size()) {
+                continue;
+            }
+            if (doc_hits[po.doc_id] == 0u) {
+                touched_docs.push_back(po.doc_id);
+            }
+            ++doc_hits[po.doc_id];
+        }
+    }
+
+    if (states.empty()) {
+        return false;
+    }
+    if (profile != nullptr) {
+        profile->matched_query_terms = states.size();
+    }
+
+    for (const DocID did : touched_docs) {
+        if (!require_all_terms || doc_hits[did] == states.size()) {
+            ++total_hits;
+        }
+    }
+    if (total_hits == 0) {
+        return false;
+    }
+
+    std::vector<int> years;
+    years.reserve(year_doc_index_.size());
+    for (const auto& entry : year_doc_index_) {
+        years.push_back(entry.first);
+    }
+    std::sort(years.begin(), years.end(), std::greater<int>());
+
+    const float avdl = avg_dl_ > 0.0f ? avg_dl_ : 1.0f;
+    for (const int year : years) {
+        const auto it = year_doc_index_.find(year);
+        if (it == year_doc_index_.end()) {
+            continue;
+        }
+        for (const DocID did : it->second) {
+            if (did >= doc_hits.size() || doc_hits[did] == 0u) {
+                continue;
+            }
+            if (require_all_terms && doc_hits[did] != states.size()) {
+                continue;
+            }
+            float score = 0.0f;
+            for (const NewestTerm& st : states) {
+                const auto pos = std::lower_bound(
+                    st.postings->begin(), st.postings->end(), did,
+                    [](const Posting& po, const DocID target) { return po.doc_id < target; });
+                if (pos == st.postings->end() || pos->doc_id != did) {
+                    continue;
+                }
+                const float dl = static_cast<float>(doc_length_for(did));
+                const float K = k_bm25_k1 * ((1.0f - k_bm25_b) + k_bm25_b * (dl / avdl));
+                const float tf = static_cast<float>(pos->tf);
+                score += st.idf * (tf * (k_bm25_k1 + 1.0f)) / (tf + K);
+                if (profile != nullptr) {
+                    profile->postings_scored += 1;
+                }
+            }
+            ordered.push_back({score, did});
+            if (profile != nullptr) {
+                profile->docs_touched += 1;
+            }
+            if (ordered.size() >= requested_topk) {
+                goto newest_done;
+            }
+        }
+    }
+
+newest_done:
+    if (ordered.empty()) {
+        return false;
+    }
+    std::sort(ordered.begin(), ordered.end(), [&](const std::pair<float, DocID>& a, const std::pair<float, DocID>& b) {
+        const int ya = a.second < forward_index_.size() ? forward_index_[a.second].year : 0;
+        const int yb = b.second < forward_index_.size() ? forward_index_[b.second].year : 0;
+        if (ya != yb) {
+            return ya > yb;
+        }
+        if (a.first != b.first) {
+            return a.first > b.first;
+        }
+        return a.second < b.second;
+    });
+    return true;
+}
+
+bool ExtremeEngine::try_search_f5_prefix_topk(
+    const std::vector<std::pair<std::string_view, float>>& terms, const std::size_t requested_topk,
+    std::vector<std::pair<float, DocID>>& ordered, std::size_t& total_hits, F5SearchProfile* profile) const {
+    ordered.clear();
+    total_hits = 0;
+    if (terms.empty() || requested_topk == 0 || forward_index_.empty()) {
+        return false;
+    }
+
+    if (scoring_board_.size() != forward_index_.size()) {
+        scoring_board_.assign(forward_index_.size(), 0.0f);
+    }
+
+    const double N = static_cast<double>(forward_index_.size());
+    const float avdl = avg_dl_ > 0.0f ? avg_dl_ : 1.0f;
+    std::vector<DocID> modified_docs;
+    modified_docs.reserve(4096);
+    std::size_t matched_terms = 0;
+
+    for (const auto& q : terms) {
+        const std::vector<Posting>* plist = keyword_postings(q.first);
+        if (plist == nullptr || plist->empty()) {
+            continue;
+        }
+        ++matched_terms;
+        if (profile != nullptr) {
+            profile->postings_visited += plist->size();
+        }
+        const double df = static_cast<double>(plist->size());
+        const double df_ratio = df / N;
+        const float penalty = f5_high_df_penalty(df_ratio) * (is_f5_query_stopword(q.first) ? 0.35f : 1.0f);
+        const float idf = static_cast<float>(std::log((N - df + 0.5) / (df + 0.5) + 1.0)) * penalty * q.second;
+        for (const Posting& po : *plist) {
+            const DocID did = po.doc_id;
+            if (did >= forward_index_.size()) {
+                continue;
+            }
+            const float dl = static_cast<float>(doc_length_for(did));
+            const float K = k_bm25_k1 * ((1.0f - k_bm25_b) + k_bm25_b * (dl / avdl));
+            const float tf = static_cast<float>(po.tf);
+            const float inc = idf * (tf * (k_bm25_k1 + 1.0f)) / (tf + K);
+            const float prev = scoring_board_[did];
+            scoring_board_[did] = prev + inc;
+            if (prev == 0.0f) {
+                modified_docs.push_back(did);
+            }
+            if (profile != nullptr) {
+                profile->postings_scored += 1;
+            }
+        }
+    }
+
+    if (matched_terms == 0 || modified_docs.empty()) {
+        return false;
+    }
+    total_hits = modified_docs.size();
+    ordered.reserve(modified_docs.size());
+    for (const DocID did : modified_docs) {
+        ordered.push_back({scoring_board_[did], did});
+    }
+
+    auto better = [&](const std::pair<float, DocID>& a, const std::pair<float, DocID>& b) {
+        if (a.first != b.first) {
+            return a.first > b.first;
+        }
+        const int ya = a.second < forward_index_.size() ? forward_index_[a.second].year : 0;
+        const int yb = b.second < forward_index_.size() ? forward_index_[b.second].year : 0;
+        if (ya != yb) {
+            return ya > yb;
+        }
+        return a.second < b.second;
+    };
+    if (ordered.size() > requested_topk) {
+        std::nth_element(ordered.begin(), ordered.begin() + static_cast<std::ptrdiff_t>(requested_topk),
+                         ordered.end(), better);
+        ordered.resize(requested_topk);
+    }
+    std::sort(ordered.begin(), ordered.end(), better);
+
+    for (const DocID did : modified_docs) {
+        scoring_board_[did] = 0.0f;
+    }
+    if (profile != nullptr) {
+        profile->matched_query_terms = matched_terms;
+        profile->docs_touched += modified_docs.size();
+        profile->total_hits = total_hits;
+    }
+    return !ordered.empty();
+}
+
+bool ExtremeEngine::try_search_f5_single_term_blockmax(
+    std::string_view term, float query_boost, std::size_t requested_topk,
+    std::vector<std::pair<float, DocID>>& ordered, std::size_t& total_hits,
+    F5SearchProfile* profile) const {
+    ordered.clear();
+    total_hits = 0;
+    if (requested_topk == 0 || forward_index_.empty()) {
+        return false;
+    }
+    const std::vector<Posting>* plist = keyword_global_.find(term);
+    if (plist == nullptr || plist->empty()) {
+        return false;
+    }
+    const std::vector<F5PostingBlockMeta>* blocks = f5_term_block_meta_.find(term);
+    if (blocks == nullptr || blocks->empty()) {
+        return false;
+    }
+
+    total_hits = plist->size();
+    if (profile != nullptr) {
+        profile->postings_visited += plist->size();
+        profile->matched_query_terms = 1;
+    }
+    const double N = static_cast<double>(forward_index_.size());
+    const double df = static_cast<double>(plist->size());
+    const double df_ratio = df / N;
+    const float penalty = f5_high_df_penalty(df_ratio) * (is_f5_query_stopword(term) ? 0.35f : 1.0f);
+    const float idf = static_cast<float>(std::log((N - df + 0.5) / (df + 0.5) + 1.0)) * penalty * query_boost;
+    const float avdl = avg_dl_ > 0.0f ? avg_dl_ : 1.0f;
+
+    auto score_posting = [&](const Posting& po) {
+        const float dl = static_cast<float>(std::max<std::uint32_t>(1u, forward_index_[po.doc_id].doc_length));
+        const float K = k_bm25_k1 * ((1.0f - k_bm25_b) + k_bm25_b * (dl / avdl));
+        const float tf = static_cast<float>(po.tf);
+        return idf * (tf * (k_bm25_k1 + 1.0f)) / (tf + K);
+    };
+    auto max_block_score = [&](const F5PostingBlockMeta& block) {
+        const float tf = static_cast<float>(std::max<std::uint16_t>(1u, block.max_tf));
+        const float K = k_bm25_k1 * (1.0f - k_bm25_b);
+        return idf * (tf * (k_bm25_k1 + 1.0f)) / (tf + K);
+    };
+
+    using ScoreDoc = std::pair<float, DocID>;
+    std::priority_queue<ScoreDoc, std::vector<ScoreDoc>, std::greater<ScoreDoc>> heap;
+    float threshold = 0.0f;
+    constexpr std::size_t kBlockSize = 128;
+    for (std::size_t bi = 0; bi < blocks->size(); ++bi) {
+        if (heap.size() >= requested_topk && max_block_score((*blocks)[bi]) <= threshold) {
+            if (profile != nullptr) {
+                profile->blocks_pruned += 1;
+            }
+            continue;
+        }
+        const std::size_t beg = bi * kBlockSize;
+        const std::size_t end = std::min<std::size_t>(plist->size(), beg + kBlockSize);
+        for (std::size_t i = beg; i < end; ++i) {
+            const Posting& po = (*plist)[i];
+            if (po.doc_id >= forward_index_.size()) {
+                continue;
+            }
+            if (profile != nullptr) {
+                profile->postings_scored += 1;
+            }
+            const float score = score_posting(po);
+            if (heap.size() < requested_topk) {
+                heap.push({score, po.doc_id});
+                if (heap.size() == requested_topk) {
+                    threshold = heap.top().first;
+                }
+            } else if (score > threshold || (score == threshold && po.doc_id < heap.top().second)) {
+                heap.pop();
+                heap.push({score, po.doc_id});
+                threshold = heap.top().first;
+            }
+        }
+    }
+
+    ordered.reserve(heap.size());
+    while (!heap.empty()) {
+        ordered.push_back(heap.top());
+        heap.pop();
+    }
+    std::sort(ordered.begin(), ordered.end(), [&](const ScoreDoc& a, const ScoreDoc& b) {
+        if (a.first != b.first) {
+            return a.first > b.first;
+        }
+        const int ya = forward_index_[a.second].year;
+        const int yb = forward_index_[b.second].year;
+        if (ya != yb) {
+            return ya > yb;
+        }
+        return a.second < b.second;
+    });
+    if (profile != nullptr) {
+        profile->docs_touched = ordered.size();
+        profile->total_hits = total_hits;
+    }
+    return !ordered.empty();
+}
+
+bool ExtremeEngine::try_search_f5_or_blockmax(
+    const std::vector<std::pair<std::string_view, float>>& terms, std::size_t requested_topk,
+    std::vector<std::pair<float, DocID>>& ordered, std::size_t& total_hits,
+    F5SearchProfile* profile) const {
+    ordered.clear();
+    total_hits = 0;
+    if (terms.size() < 2 || requested_topk == 0 || forward_index_.empty()) {
+        return false;
+    }
+
+    struct TermState {
+        const std::vector<Posting>* postings = nullptr;
+        const std::vector<F5PostingBlockMeta>* blocks = nullptr;
+        float idf = 0.0f;
+    };
+
+    const double N = static_cast<double>(forward_index_.size());
+    std::vector<TermState> states;
+    states.reserve(terms.size());
+    std::uint64_t total_postings = 0;
+    for (const auto& q : terms) {
+        const std::vector<Posting>* plist = keyword_global_.find(q.first);
+        const std::vector<F5PostingBlockMeta>* blocks = f5_term_block_meta_.find(q.first);
+        if (plist == nullptr || plist->empty() || blocks == nullptr || blocks->empty()) {
+            return false;
+        }
+        const double df = static_cast<double>(plist->size());
+        const double df_ratio = df / N;
+        const float penalty = f5_high_df_penalty(df_ratio) * (is_f5_query_stopword(q.first) ? 0.35f : 1.0f);
+        const float idf = static_cast<float>(std::log((N - df + 0.5) / (df + 0.5) + 1.0)) * penalty * q.second;
+        states.push_back(TermState{plist, blocks, idf});
+        total_postings += plist->size();
+        if (profile != nullptr) {
+            profile->postings_visited += plist->size();
+        }
+    }
+    if (profile != nullptr) {
+        profile->matched_query_terms = terms.size();
+    }
+
+    std::unordered_map<DocID, float> scores;
+    scores.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(total_postings, 1u << 20)));
+    const float avdl = avg_dl_ > 0.0f ? avg_dl_ : 1.0f;
+    constexpr std::size_t kBlockSize = 128;
+
+    for (const TermState& st : states) {
+        auto max_block_score = [&](const F5PostingBlockMeta& block) {
+            const float tf = static_cast<float>(std::max<std::uint16_t>(1u, block.max_tf));
+            const float K = k_bm25_k1 * (1.0f - k_bm25_b);
+            return st.idf * (tf * (k_bm25_k1 + 1.0f)) / (tf + K);
+        };
+
+        std::vector<std::pair<float, std::size_t>> block_order;
+        block_order.reserve(st.blocks->size());
+        for (std::size_t bi = 0; bi < st.blocks->size(); ++bi) {
+            block_order.push_back({max_block_score((*st.blocks)[bi]), bi});
+        }
+        std::sort(block_order.begin(), block_order.end(),
+                  [](const auto& a, const auto& b) {
+                      if (a.first != b.first) {
+                          return a.first > b.first;
+                      }
+                      return a.second < b.second;
+                  });
+
+        std::priority_queue<std::pair<float, DocID>, std::vector<std::pair<float, DocID>>,
+                            std::greater<std::pair<float, DocID>>>
+            heap_probe;
+        float threshold = 0.0f;
+        for (const auto& bm : block_order) {
+            if (heap_probe.size() >= requested_topk && bm.first <= threshold) {
+                if (profile != nullptr) {
+                    profile->blocks_pruned += 1;
+                }
+                break;
+            }
+            const std::size_t bi = bm.second;
+            const std::size_t beg = bi * kBlockSize;
+            const std::size_t end = std::min<std::size_t>(st.postings->size(), beg + kBlockSize);
+            for (std::size_t i = beg; i < end; ++i) {
+                const Posting& po = (*st.postings)[i];
+                if (po.doc_id >= forward_index_.size()) {
+                    continue;
+                }
+                if (profile != nullptr) {
+                    profile->postings_scored += 1;
+                }
+                const float dl = static_cast<float>(std::max<std::uint32_t>(1u, forward_index_[po.doc_id].doc_length));
+                const float K = k_bm25_k1 * ((1.0f - k_bm25_b) + k_bm25_b * (dl / avdl));
+                const float tf = static_cast<float>(po.tf);
+                const float inc = st.idf * (tf * (k_bm25_k1 + 1.0f)) / (tf + K);
+                scores[po.doc_id] += inc;
+
+                const float s = scores[po.doc_id];
+                if (heap_probe.size() < requested_topk) {
+                    heap_probe.push({s, po.doc_id});
+                    if (heap_probe.size() == requested_topk) {
+                        threshold = heap_probe.top().first;
+                    }
+                } else if (s > threshold || (s == threshold && po.doc_id < heap_probe.top().second)) {
+                    heap_probe.pop();
+                    heap_probe.push({s, po.doc_id});
+                    threshold = heap_probe.top().first;
+                }
+            }
+        }
+    }
+
+    total_hits = scores.size();
+    if (scores.empty()) {
+        return false;
+    }
+
+    using ScoreDoc = std::pair<float, DocID>;
+    std::priority_queue<ScoreDoc, std::vector<ScoreDoc>, std::greater<ScoreDoc>> top;
+    for (const auto& kv : scores) {
+        const ScoreDoc sd{kv.second, kv.first};
+        if (top.size() < requested_topk) {
+            top.push(sd);
+        } else if (sd.first > top.top().first || (sd.first == top.top().first && sd.second < top.top().second)) {
+            top.pop();
+            top.push(sd);
+        }
+    }
+
+    ordered.reserve(top.size());
+    while (!top.empty()) {
+        ordered.push_back(top.top());
+        top.pop();
+    }
+    std::sort(ordered.begin(), ordered.end(), [&](const ScoreDoc& a, const ScoreDoc& b) {
+        if (a.first != b.first) {
+            return a.first > b.first;
+        }
+        const int ya = forward_index_[a.second].year;
+        const int yb = forward_index_[b.second].year;
+        if (ya != yb) {
+            return ya > yb;
+        }
+        return a.second < b.second;
+    });
+    if (profile != nullptr) {
+        profile->docs_touched = scores.size();
+        profile->total_hits = total_hits;
+    }
+    return !ordered.empty();
+}
+
+void ExtremeEngine::rebuild_f3_top100_cache() {
+    using AuthorCount = std::pair<std::size_t, std::string_view>;
+    using MinHeap = std::priority_queue<AuthorCount, std::vector<AuthorCount>, std::greater<AuthorCount>>;
+
+    MinHeap top100;
+    author_global_.for_each([&](std::string_view author, const std::vector<Posting>& postings) {
+        const std::size_t paper_count = postings.size();
+        if (paper_count == 0) {
+            return;
+        }
+        if (top100.size() < 100) {
+            top100.push({paper_count, author});
+        } else if (paper_count > top100.top().first) {
+            top100.pop();
+            top100.push({paper_count, author});
+        }
+    });
+
+    f3_top100_cache_.clear();
+    f3_top100_cache_.reserve(top100.size());
+    while (!top100.empty()) {
+        f3_top100_cache_.push_back(top100.top());
+        top100.pop();
+    }
+    std::reverse(f3_top100_cache_.begin(), f3_top100_cache_.end());
+}
+
+void ExtremeEngine::rebuild_year_doc_index() {
+    year_doc_index_.clear();
+    year_doc_index_.reserve(256);
+    for (const Document& doc : forward_index_) {
+        if (doc.title.empty()) {
+            continue;
+        }
+        year_doc_index_[doc.year].push_back(doc.id);
+    }
+}
+
+void ExtremeEngine::rebuild_f4_year_term_cache() {
+    f4_year_term_cache_.clear();
+    f4_year_term_cache_.reserve(std::max<std::size_t>(64, year_doc_index_.size() * 2));
+    f4_term_intern_.clear();
+    f4_term_intern_.reserve(std::max<std::size_t>(4096, keyword_global_.size() / 2));
+    f4_term_arena_.reset();
+
+    auto intern_f4_term = [&](std::string_view token) -> std::string_view {
+        const auto it = f4_term_intern_.find(token);
+        if (it != f4_term_intern_.end()) {
+            return it->second;
+        }
+        const std::string_view stable = f4_term_arena_.store(token);
+        f4_term_intern_.emplace(stable, stable);
+        return stable;
+    };
+
+    StringArena token_arena(4u * 1024u * 1024u);
+    std::vector<std::string_view> filtered_tokens;
+    filtered_tokens.reserve(64);
+    std::size_t processed_docs = 0;
+
+    for (const Document& doc : forward_index_) {
+        if (doc.title.empty()) {
+            continue;
+        }
+        const std::vector<std::string_view> raw_tokens = Analyzer::normalize_and_tokenize(doc.title, token_arena);
+        if (raw_tokens.empty()) {
+            continue;
+        }
+        build_f4_canonical_filtered_tokens(raw_tokens, filtered_tokens);
+        if (!filtered_tokens.empty()) {
+            auto& year_terms = f4_year_term_cache_[doc.year];
+            if (year_terms.empty()) {
+                year_terms.reserve(2048);
+            }
+            for (const std::string_view token : filtered_tokens) {
+                const std::string_view stable_term = intern_f4_term(token);
+                auto [it, inserted] = year_terms.emplace(stable_term, 0);
+                (void)inserted;
+                ++it->second;
+            }
+        }
+
+        ++processed_docs;
+        if ((processed_docs & 1023u) == 0u) {
+            token_arena.reset();
+        }
+    }
+}
+
+std::unordered_map<std::string, int> ExtremeEngine::compute_f4_term_counts_for_year(int year) const {
+    const auto it = f4_year_term_cache_.find(year);
+    if (it == f4_year_term_cache_.end() || it->second.empty()) {
+        return {};
+    }
+
+    std::unordered_map<std::string, int> out;
+    out.reserve(it->second.size());
+    for (const auto& kv : it->second) {
+        out.emplace(std::string(kv.first), kv.second);
+    }
+    return out;
+}
+
+std::vector<ExtremeEngine::F4HotEntry> ExtremeEngine::compute_f4_top10_for_year(int year) const {
+    const auto cache_it = f4_year_term_cache_.find(year);
+    if (cache_it == f4_year_term_cache_.end() || cache_it->second.empty()) {
+        return {};
+    }
+
+    std::vector<std::pair<std::string_view, int>> ranked;
+    ranked.reserve(cache_it->second.size());
+    for (const auto& kv : cache_it->second) {
+        ranked.push_back({kv.first, kv.second});
+    }
+
+    const auto better = [](const std::pair<std::string_view, int>& a, const std::pair<std::string_view, int>& b) {
+        if (a.second != b.second) {
+            return a.second > b.second;
+        }
+        return a.first < b.first;
+    };
+
+    constexpr std::size_t kTopN = 10;
+    if (ranked.size() > kTopN) {
+        std::nth_element(ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(kTopN), ranked.end(),
+                         [&](const std::pair<std::string_view, int>& lhs, const std::pair<std::string_view, int>& rhs) {
+                             return better(lhs, rhs);
+                         });
+        ranked.resize(kTopN);
+    }
+    std::sort(ranked.begin(), ranked.end(), better);
+
+    std::vector<F4HotEntry> out;
+    out.reserve(ranked.size());
+    for (const auto& kv : ranked) {
+        out.push_back(F4HotEntry{std::string(kv.first), kv.second, 0, 0.0, static_cast<double>(kv.second)});
+    }
+    return out;
+}
+
+std::string_view ExtremeEngine::build_normalized_lookup_key(std::string_view raw_query) const {
+    query_arena_.reset();
+    const std::vector<std::string_view> toks = Analyzer::normalize_and_tokenize(raw_query, query_arena_);
+    if (toks.empty()) {
+        return {};
+    }
+    const char* const beg = toks.front().data();
+    const char* const ed = toks.back().data() + toks.back().size();
+    return {beg, static_cast<std::size_t>(ed - beg)};
+}
+
+void ExtremeEngine::print_document_details(const Document& doc, std::ostream& os) const {
+    os << "[文档ID] " << doc.id << '\n';
+    if (!doc.title.empty()) {
+        os << "[标题] " << doc.title << '\n';
+    }
+    if (!doc.authors.empty()) {
+        os << "[作者] " << doc.authors << '\n';
+    }
+    if (!doc.journal.empty()) {
+        os << "[期刊/会议] " << doc.journal << '\n';
+    }
+    os << "[年份] " << doc.year << '\n';
+    os << "[标题词数] " << doc.doc_length << '\n';
+    if (!doc.volume.empty()) {
+        os << "[卷号] " << doc.volume << '\n';
+    }
+    if (!doc.month.empty()) {
+        os << "[月份] " << doc.month << '\n';
+    }
+    if (!doc.cdrom.empty()) {
+        os << "[CDROM] " << doc.cdrom << '\n';
+    }
+    if (!doc.ee.empty()) {
+        os << "[电子版] " << doc.ee << '\n';
+    }
+    if (!doc.url.empty()) {
+        os << "[URL] " << doc.url << '\n';
+    }
+}
+
+void ExtremeEngine::search_by_author(std::string_view query, std::ostream& os) const {
+    const F1AuthorQueryPlan plan = parse_f1_author_query_plan(query);
+    const std::string_view effective_query = plan.author_query.empty() ? query : std::string_view(plan.author_query);
+    const std::string_view key = build_normalized_lookup_key(effective_query);
+    if (key.empty()) {
+        os << "查询无效（无法规范化）\n";
+        return;
+    }
+
+    auto emit_postings = [&](std::string_view matched_author, const std::vector<Posting>& hits) {
+        os << "[作者] " << matched_author << " | [论文数] " << hits.size() << "\n\n";
+        for (const Posting& po : hits) {
+            if (po.doc_id >= forward_index_.size()) {
+                continue;
+            }
+            print_document_details(forward_index_[po.doc_id], os);
+            os << '\n';
+        }
+    };
+
+    if (const std::vector<Posting>* plist = author_global_.find(key); plist != nullptr && !plist->empty()) {
+        emit_postings(key, *plist);
+        return;
+    }
+
+    if (!plan.fuzzy_enabled || key.size() < 3) {
+        os << "未找到匹配作者。\n";
+        return;
+    }
+
+    std::vector<std::pair<std::string_view, float>> fuzzy_authors;
+    collect_f1_fuzzy_author_candidates(key, plan.fuzzy_max_edits, fuzzy_authors);
+    if (fuzzy_authors.empty()) {
+        os << "未找到匹配作者。\n";
+        return;
+    }
+
+    const std::string_view best_author = fuzzy_authors.front().first;
+    const std::vector<Posting>* plist = author_global_.find(best_author);
+    if (plist == nullptr || plist->empty()) {
+        os << "未找到匹配作者。\n";
+        return;
+    }
+
+    os << "[F1-容错] " << key << " -> " << best_author << " | [得分] " << fuzzy_authors.front().second << "\n";
+    if (fuzzy_authors.size() > 1) {
+        os << "[候选作者Top3] ";
+        const std::size_t shown = std::min<std::size_t>(3, fuzzy_authors.size());
+        for (std::size_t i = 0; i < shown; ++i) {
+            if (i != 0) {
+                os << " ; ";
+            }
+            os << fuzzy_authors[i].first;
+        }
+        os << "\n\n";
+    } else {
+        os << "\n";
+    }
+
+    for (const Posting& po : *plist) {
+        if (po.doc_id >= forward_index_.size()) {
+            continue;
+        }
+        print_document_details(forward_index_[po.doc_id], os);
+        os << '\n';
+    }
+}
+
+void ExtremeEngine::search_by_title(std::string_view query, std::ostream& os) const {
+    const std::string_view key = build_normalized_lookup_key(query);
+    if (key.empty()) {
+        os << "查询无效（无法规范化）\n";
+        return;
+    }
+    const std::vector<Posting>* plist = title_exact_global_.find(key);
+    auto emit_postings = [&](const std::vector<Posting>& hits) {
+        for (const Posting& po : hits) {
+            if (po.doc_id >= forward_index_.size()) {
+                continue;
+            }
+            print_document_details(forward_index_[po.doc_id], os);
+            os << '\n';
+        }
+    };
+    if (plist != nullptr && !plist->empty()) {
+        emit_postings(*plist);
+        return;
+    }
+
+    // Fallback path:
+    // When normalized title exact index misses due normalization-edge mismatch, use
+    // rarest query term postings as candidates, then verify full normalized title equality.
+    const std::string key_copy(key);
+    std::vector<std::string_view> q_terms;
+    q_terms.reserve(16);
+    {
+        std::size_t i = 0;
+        while (i < key_copy.size()) {
+            while (i < key_copy.size() && key_copy[i] == ' ') {
+                ++i;
+            }
+            if (i >= key_copy.size()) {
+                break;
+            }
+            const std::size_t beg = i;
+            while (i < key_copy.size() && key_copy[i] != ' ') {
+                ++i;
+            }
+            q_terms.emplace_back(key_copy.data() + beg, i - beg);
+        }
+    }
+    if (q_terms.empty()) {
+        os << "未找到精确匹配标题。\n";
+        return;
+    }
+
+    const std::vector<Posting>* seed = nullptr;
+    for (const std::string_view t : q_terms) {
+        const std::vector<Posting>* cur = keyword_global_.find(t);
+        if (cur == nullptr || cur->empty()) {
+            continue;
+        }
+        if (seed == nullptr || cur->size() < seed->size()) {
+            seed = cur;
+        }
+    }
+    if (seed == nullptr || seed->empty()) {
+        os << "未找到精确匹配标题。\n";
+        return;
+    }
+
+    StringArena verify_arena(256u * 1024u);
+    std::vector<Posting> recovered;
+    recovered.reserve(4);
+    std::size_t checked = 0;
+
+    for (const Posting& po : *seed) {
+        if (po.doc_id >= forward_index_.size()) {
+            continue;
+        }
+        const Document& doc = forward_index_[po.doc_id];
+        if (doc.title.empty()) {
+            continue;
+        }
+        const std::string_view normalized_doc_title = normalized_span(verify_arena, doc.title);
+        if (!normalized_doc_title.empty() && normalized_doc_title == key_copy) {
+            recovered.push_back(Posting{po.doc_id, 1u});
+        }
+        ++checked;
+        if ((checked & 2047u) == 0u) {
+            verify_arena.reset();
+        }
+    }
+
+    if (recovered.empty()) {
+        os << "未找到精确匹配标题。\n";
+        return;
+    }
+    emit_postings(recovered);
+}
+
+void ExtremeEngine::search_collaborators(std::string_view target_author, std::ostream& os) const {
+    query_arena_.reset();
+    const std::vector<std::string_view> key_toks = Analyzer::normalize_and_tokenize(target_author, query_arena_);
+    if (key_toks.empty()) {
+        os << "查询无效（无法规范化）\n";
+        return;
+    }
+    const char* const kb = key_toks.front().data();
+    const char* const ke = key_toks.back().data() + key_toks.back().size();
+    const std::string_view key_span(kb, static_cast<std::size_t>(ke - kb));
+
+    const std::vector<Posting>* plist = author_global_.find(key_span);
+    if (plist == nullptr || plist->empty()) {
+        os << "未找到该作者。\n";
+        return;
+    }
+
+    FlatMap<std::string_view, std::uint8_t> dedupe;
+
+    for (const Posting& po : *plist) {
+        if (po.doc_id >= forward_index_.size()) {
+            continue;
+        }
+        const Document& doc = forward_index_[po.doc_id];
+        if (doc.authors.empty()) {
+            continue;
+        }
+        for_each_author_segment(doc.authors, [&](std::string_view seg) {
+            const std::string_view trimmed = trim_sv(seg);
+            if (trimmed.empty()) {
+                return;
+            }
+            const std::vector<std::string_view> co_toks = Analyzer::normalize_and_tokenize(trimmed, query_arena_);
+            if (co_toks.empty()) {
+                return;
+            }
+            const char* const cb = co_toks.front().data();
+            const char* const ce = co_toks.back().data() + co_toks.back().size();
+            const std::string_view nk(cb, static_cast<std::size_t>(ce - cb));
+            if (nk == key_span) {
+                return;
+            }
+            if (dedupe.find(nk) != nullptr) {
+                return;
+            }
+            dedupe[nk] = 1;
+            os << trimmed << '\n';
+        });
+    }
+}
+
+void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5SearchOptions opts) const {
+    const auto t_wall0 = std::chrono::steady_clock::now();
+    F5SearchProfile* profile = opts.profile;
+    active_profile_ = profile;
+    if (profile != nullptr) {
+        profile->reset();
+    }
+
+    const std::size_t n = forward_index_.size();
+    if (n == 0) {
+        os << "索引为空。\n";
+        if (profile != nullptr) {
+            profile->path = F5ExecPath::InvalidQuery;
+            profile->total_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+        }
+        active_profile_ = nullptr;
+        return;
+    }
+    if (scoring_board_.size() != n) {
+        scoring_board_.assign(n, 0.0f);
+    }
+
+    const auto t_parse0 = std::chrono::steady_clock::now();
+    query_arena_.reset();
+    const F5QueryPlan plan = parse_f5_query_plan(keywords);
+    const double parse_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_parse0).count();
+    if (profile != nullptr) {
+        profile->parse_ms = parse_ms;
+    }
+    using ScoreDoc = std::pair<float, DocID>;
+    struct F5WindowView {
+        bool page_mode = false;
+        std::size_t start = 0;
+        std::size_t end = 0;
+        std::size_t current_page = 1;
+        std::size_t page_size = 0;
+        std::size_t total_pages = 1;
+    };
+    const auto compute_window = [&](std::size_t total_hits) -> F5WindowView {
+        F5WindowView w;
+        w.page_mode = (plan.page > 0 || plan.size > 0);
+        if (total_hits == 0) {
+            return w;
+        }
+        if (w.page_mode) {
+            w.page_size = plan.size > 0 ? plan.size : (plan.limit > 0 ? plan.limit : 20);
+            w.current_page = plan.page > 0 ? plan.page : 1;
+            w.total_pages = (total_hits + w.page_size - 1) / w.page_size;
+            if (w.current_page > w.total_pages) {
+                w.current_page = w.total_pages;
+            }
+            w.start = (w.current_page - 1) * w.page_size;
+            w.end = std::min<std::size_t>(total_hits, w.start + w.page_size);
+        } else {
+            w.start = std::min<std::size_t>(plan.offset, total_hits);
+            w.end = total_hits;
+            if (plan.limit > 0) {
+                w.end = std::min<std::size_t>(total_hits, w.start + plan.limit);
+            }
+        }
+        return w;
+    };
+    const std::string cache_key = std::to_string(n) + "|" + std::string(keywords);
+    auto emit_ranked_results = [&](const std::vector<ScoreDoc>& ordered_docs, std::size_t total_hits,
+                                   std::size_t matched_query_terms, std::size_t fuzzy_rewrite_count,
+                                   bool cache_hit, F5ExecPath path_tag) {
+        const auto t_emit0 = std::chrono::steady_clock::now();
+        const F5WindowView w = compute_window(total_hits);
+        if (profile != nullptr) {
+            profile->path = path_tag;
+            profile->result_cache_hit = cache_hit;
+            profile->total_hits = total_hits;
+            profile->matched_query_terms = matched_query_terms;
+            profile->fuzzy_rewrite_count = fuzzy_rewrite_count;
+            profile->requested_topk = w.page_mode ? w.current_page * w.page_size : plan.limit;
+            if (profile->requested_topk == 0 && w.page_mode) {
+                profile->requested_topk = w.page_size;
+            }
+        }
+        if (!opts.emit_results) {
+            if (profile != nullptr) {
+                profile->results_emitted = (w.end > w.start) ? (w.end - w.start) : 0;
+                profile->emit_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_emit0).count();
+            }
+            return;
+        }
+        os << "[匹配模式] " << (plan.boolean_mode == F5BooleanMode::And ? "AND" : "OR")
+           << " | [排序] " << (plan.sort_mode == F5SortMode::Newest ? "最新年份" : "相关度")
+           << " | [容错] " << (plan.fuzzy_enabled ? "开启" : "关闭")
+           << '/' << plan.fuzzy_max_edits << '/' << plan.fuzzy_max_expansions
+           << " | [命中词数] " << matched_query_terms
+           << " | [容错改写] " << fuzzy_rewrite_count
+           << " | [总命中] " << total_hits;
+        if (cache_hit) {
+            os << " | [结果缓存] 命中";
+        }
+        if (w.page_mode) {
+            os << " | [页码] " << w.current_page << "/" << w.total_pages
+               << " | [每页数量] " << w.page_size
+               << " | [结果窗口] " << w.start << "-" << (w.end == 0 ? 0 : w.end - 1);
+            if (plan.offset > 0) {
+                os << "\n[提示] page/size 模式下 offset 已忽略。\n";
+            }
+            if (w.current_page < w.total_pages) {
+                os << "\n[提示] 下一页可使用: page:" << (w.current_page + 1) << " size:" << w.page_size << "\n";
+            }
+        } else {
+            os << " | [结果窗口] " << w.start << "-" << (w.end == 0 ? 0 : w.end - 1)
+               << " | [数量限制] " << (plan.limit == 0 ? "全部" : std::to_string(plan.limit));
+        }
+        os << "\n\n";
+
+        for (std::size_t i = w.start; i < w.end; ++i) {
+            const ScoreDoc& e = ordered_docs[i];
+            print_document_details(forward_index_[e.second], os);
+            os << "[排名] " << (i + 1) << '\n';
+            os << "[BM25] " << e.first << "\n\n";
+        }
+        if (profile != nullptr) {
+            profile->results_emitted = (w.end > w.start) ? (w.end - w.start) : 0;
+            profile->emit_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_emit0).count();
+        }
+    };
+    if (const auto it = f5_result_cache_.find(cache_key); it != f5_result_cache_.end()) {
+        const F5ResultCacheEntry& cached = it->second;
+        const F5WindowView w = compute_window(cached.total_hits);
+        if (w.end <= cached.ordered_prefix.size()) {
+            emit_ranked_results(cached.ordered_prefix, cached.total_hits, cached.matched_query_terms,
+                                cached.fuzzy_rewrite_count, true, F5ExecPath::ResultCache);
+            if (profile != nullptr) {
+                profile->total_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+            }
+            active_profile_ = nullptr;
+            return;
+        }
+    }
+
+    const auto t_rewrite0 = std::chrono::steady_clock::now();
+
+    auto get_keyword_postings = [&](std::string_view term) -> const std::vector<Posting>* {
+        std::string key(term);
+        if (const auto it = f5_hot_term_postings_cache_.find(key); it != f5_hot_term_postings_cache_.end()) {
+            return it->second;
+        }
+        const std::vector<Posting>* plist = keyword_global_.find(term);
+        if (plist == nullptr || plist->empty()) {
+            return plist;
+        }
+        while (f5_hot_term_postings_cache_.size() >= k_f5_hot_term_postings_cache_cap &&
+               !f5_hot_term_postings_cache_fifo_.empty()) {
+            const std::string evict = std::move(f5_hot_term_postings_cache_fifo_.front());
+            f5_hot_term_postings_cache_fifo_.pop_front();
+            f5_hot_term_postings_cache_.erase(evict);
+        }
+        auto [insert_it, inserted] = f5_hot_term_postings_cache_.emplace(std::move(key), plist);
+        if (inserted) {
+            f5_hot_term_postings_cache_fifo_.push_back(insert_it->first);
+        }
+        return plist;
+    };
+
+    const std::string_view term_query = std::string_view(plan.terms_query);
+    std::vector<std::string_view> dedup_terms;
+    std::vector<std::string_view> raw_terms = Analyzer::normalize_and_tokenize(term_query, query_arena_);
+    dedup_terms.reserve(raw_terms.size() + 64);
+    std::unordered_map<std::string_view, std::uint8_t> term_seen;
+    term_seen.reserve(raw_terms.size() * 4 + 64);
+    for (const std::string_view t : raw_terms) {
+        const auto [it, inserted] = term_seen.emplace(t, 1u);
+        if (inserted) {
+            dedup_terms.push_back(it->first);
+        }
+    }
+
+    std::vector<std::string_view> expanded_terms;
+    for (const std::string& pfx : plan.prefix_terms) {
+        collect_f5_prefix_candidates(pfx, expanded_terms);
+        for (const std::string_view t : expanded_terms) {
+            const auto [it, inserted] = term_seen.emplace(t, 1u);
+            if (inserted) {
+                dedup_terms.push_back(it->first);
+            }
+        }
+    }
+    for (const std::string& sub : plan.substring_terms) {
+        if (sub.size() < 3) {
+        os << "[提示] 子串检索建议至少 3 个字符，已忽略: ~" << sub << "~\n";
+            continue;
+        }
+        collect_f5_substring_candidates(sub, expanded_terms);
+        for (const std::string_view t : expanded_terms) {
+            const auto [it, inserted] = term_seen.emplace(t, 1u);
+            if (inserted) {
+                dedup_terms.push_back(it->first);
+            }
+        }
+    }
+
+    if (dedup_terms.empty()) {
+        if (opts.emit_results) {
+            os << "无有效查询词。\n";
+        }
+        if (profile != nullptr) {
+            profile->path = F5ExecPath::InvalidQuery;
+            profile->rewrite_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_rewrite0).count();
+            profile->total_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+        }
+        active_profile_ = nullptr;
+        return;
+    }
+
+    std::vector<std::string_view> filtered_terms;
+    filtered_terms.reserve(dedup_terms.size());
+    for (const std::string_view t : dedup_terms) {
+        if (!is_f5_query_stopword(t)) {
+            filtered_terms.push_back(t);
+        }
+    }
+    std::vector<std::string_view> terms = filtered_terms.empty() ? dedup_terms : filtered_terms;
+    if (terms.empty()) {
+        if (opts.emit_results) {
+            os << "无有效查询词。\n";
+        }
+        if (profile != nullptr) {
+            profile->path = F5ExecPath::InvalidQuery;
+            profile->rewrite_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_rewrite0).count();
+            profile->total_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+        }
+        active_profile_ = nullptr;
+        return;
+    }
+    if (profile != nullptr) {
+        profile->raw_query_terms = terms.size();
+    }
+
+    struct F5ScoringTerm {
+        std::string_view term;
+        float query_boost = 1.0f;
+    };
+    std::vector<F5ScoringTerm> scoring_terms;
+    scoring_terms.reserve(terms.size() + 16);
+    std::unordered_map<std::string_view, std::size_t> scoring_term_pos;
+    scoring_term_pos.reserve(terms.size() * 2 + 16);
+    auto add_scoring_term = [&](std::string_view term, float boost) {
+        auto it = scoring_term_pos.find(term);
+        if (it == scoring_term_pos.end()) {
+            const std::size_t pos = scoring_terms.size();
+            scoring_terms.push_back(F5ScoringTerm{term, boost});
+            scoring_term_pos.emplace(term, pos);
+        } else {
+            F5ScoringTerm& ref = scoring_terms[it->second];
+            ref.query_boost = std::max(ref.query_boost, boost);
+        }
+    };
+
+    std::vector<std::pair<std::string_view, float>> fuzzy_terms;
+    std::size_t fuzzy_rewrite_count = 0;
+    for (const std::string_view term : terms) {
+        const std::vector<Posting>* exact = get_keyword_postings(term);
+        if (exact != nullptr && !exact->empty()) {
+            add_scoring_term(term, 1.0f);
+            continue;
+        }
+        if (!plan.fuzzy_enabled || term.size() < 3 || term.size() > 32 || is_f5_query_stopword(term)) {
+            if (plan.boolean_mode == F5BooleanMode::And) {
+                os << "未找到匹配结果（AND 模式下有查询词无命中）。\n";
+                return;
+            }
+            continue;
+        }
+
+        fuzzy_terms.clear();
+        collect_f5_fuzzy_candidates(term, plan.fuzzy_max_edits, fuzzy_terms);
+        if (fuzzy_terms.empty()) {
+            if (plan.boolean_mode == F5BooleanMode::And) {
+                os << "未找到匹配结果（AND 模式下有查询词无命中）。\n";
+                return;
+            }
+            continue;
+        }
+        ++fuzzy_rewrite_count;
+        const std::size_t adaptive_cap =
+            term.size() <= 5 ? std::min<std::size_t>(3, plan.fuzzy_max_expansions) : plan.fuzzy_max_expansions;
+        const std::size_t cap = (plan.boolean_mode == F5BooleanMode::And) ? 1 : adaptive_cap;
+        std::size_t used = 0;
+        for (const auto& fv : fuzzy_terms) {
+            add_scoring_term(fv.first, fv.second);
+            ++used;
+            if (used >= cap) {
+                break;
+            }
+        }
+        os << "[容错] " << term << " -> " << fuzzy_terms.front().first << '\n';
+    }
+
+    if (scoring_terms.empty()) {
+        if (opts.emit_results) {
+            os << "未找到匹配结果。\n";
+        }
+        if (profile != nullptr) {
+            profile->path = F5ExecPath::NoHits;
+            profile->rewrite_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_rewrite0).count();
+            profile->total_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+        }
+        active_profile_ = nullptr;
+        return;
+    }
+    if (profile != nullptr) {
+        profile->scoring_terms = scoring_terms.size();
+        profile->fuzzy_rewrite_count = fuzzy_rewrite_count;
+        profile->rewrite_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_rewrite0).count();
+    }
+
+    std::size_t requested_topk = 0;
+    if (plan.page > 0 || plan.size > 0) {
+        const std::size_t page_size_req = plan.size > 0 ? plan.size : (plan.limit > 0 ? plan.limit : 20);
+        const std::size_t page_req = plan.page > 0 ? plan.page : 1;
+        requested_topk = page_req * page_size_req;
+    } else if (plan.limit > 0) {
+        requested_topk = plan.offset + plan.limit;
+    }
+    const bool can_use_single_term_blockmax =
+        scoring_terms.size() == 1 &&
+        plan.boolean_mode == F5BooleanMode::Or &&
+        plan.sort_mode == F5SortMode::Relevance &&
+        plan.phrases.empty() &&
+        requested_topk > 0;
+    if (profile != nullptr) {
+        profile->requested_topk = requested_topk;
+    }
+
+    const bool can_use_newest_year =
+        !scoring_terms.empty() &&
+        scoring_terms.size() <= 16 &&
+        plan.sort_mode == F5SortMode::Newest &&
+        plan.phrases.empty() &&
+        plan.prefix_terms.empty() &&
+        plan.substring_terms.empty() &&
+        requested_topk > 0;
+    if (can_use_newest_year) {
+        std::vector<std::pair<std::string_view, float>> newest_terms;
+        newest_terms.reserve(scoring_terms.size());
+        for (const F5ScoringTerm& st : scoring_terms) {
+            newest_terms.push_back({st.term, st.query_boost});
+        }
+        std::vector<ScoreDoc> fast_ordered;
+        std::size_t fast_total_hits = 0;
+        const bool require_all_terms = (plan.boolean_mode == F5BooleanMode::And);
+        const auto t_score0 = std::chrono::steady_clock::now();
+        if (try_search_f5_newest_year(newest_terms, require_all_terms, requested_topk, fast_ordered, fast_total_hits,
+                                      profile)) {
+            if (profile != nullptr) {
+                profile->score_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_score0).count();
+            }
+            emit_ranked_results(fast_ordered, fast_total_hits, scoring_terms.size(), fuzzy_rewrite_count, false,
+                                F5ExecPath::NewestYear);
+
+            F5ResultCacheEntry entry;
+            entry.total_hits = fast_total_hits;
+            entry.matched_query_terms = scoring_terms.size();
+            entry.fuzzy_rewrite_count = fuzzy_rewrite_count;
+            const std::size_t keep_docs = std::min<std::size_t>(fast_ordered.size(), k_f5_result_cache_doc_cap);
+            entry.ordered_prefix.assign(fast_ordered.begin(),
+                                        fast_ordered.begin() + static_cast<std::ptrdiff_t>(keep_docs));
+            auto cache_it = f5_result_cache_.find(cache_key);
+            if (cache_it == f5_result_cache_.end()) {
+                while (f5_result_cache_.size() >= k_f5_result_cache_cap && !f5_result_cache_fifo_.empty()) {
+                    const std::string evict = std::move(f5_result_cache_fifo_.front());
+                    f5_result_cache_fifo_.pop_front();
+                    f5_result_cache_.erase(evict);
+                }
+                f5_result_cache_fifo_.push_back(cache_key);
+                f5_result_cache_.emplace(cache_key, std::move(entry));
+            } else {
+                cache_it->second = std::move(entry);
+            }
+            if (profile != nullptr) {
+                profile->total_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+            }
+            active_profile_ = nullptr;
+            return;
+        }
+    }
+
+    constexpr std::size_t k_daat_max_terms = 16;
+    constexpr std::size_t k_prefix_daat_max_terms = 64;
+    const bool is_prefix_relevance_query =
+        !plan.prefix_terms.empty() &&
+        plan.substring_terms.empty() &&
+        plan.sort_mode == F5SortMode::Relevance &&
+        plan.boolean_mode == F5BooleanMode::Or &&
+        plan.phrases.empty() &&
+        requested_topk > 0;
+    if (is_prefix_relevance_query && scoring_terms.size() > k_prefix_daat_max_terms &&
+        scoring_terms.size() <= k_prefix_daat_max_terms) {
+        std::vector<std::pair<std::string_view, float>> prefix_terms;
+        prefix_terms.reserve(scoring_terms.size());
+        for (const F5ScoringTerm& st : scoring_terms) {
+            prefix_terms.push_back({st.term, st.query_boost});
+        }
+        std::vector<ScoreDoc> fast_ordered;
+        std::size_t fast_total_hits = 0;
+        const auto t_score0 = std::chrono::steady_clock::now();
+        if (try_search_f5_prefix_topk(prefix_terms, requested_topk, fast_ordered, fast_total_hits, profile)) {
+            if (profile != nullptr) {
+                profile->score_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_score0).count();
+            }
+            emit_ranked_results(fast_ordered, fast_total_hits, scoring_terms.size(), fuzzy_rewrite_count, false,
+                                F5ExecPath::PrefixDaat);
+
+            F5ResultCacheEntry entry;
+            entry.total_hits = fast_total_hits;
+            entry.matched_query_terms = scoring_terms.size();
+            entry.fuzzy_rewrite_count = fuzzy_rewrite_count;
+            const std::size_t keep_docs = std::min<std::size_t>(fast_ordered.size(), k_f5_result_cache_doc_cap);
+            entry.ordered_prefix.assign(fast_ordered.begin(),
+                                        fast_ordered.begin() + static_cast<std::ptrdiff_t>(keep_docs));
+            auto cache_it = f5_result_cache_.find(cache_key);
+            if (cache_it == f5_result_cache_.end()) {
+                while (f5_result_cache_.size() >= k_f5_result_cache_cap && !f5_result_cache_fifo_.empty()) {
+                    const std::string evict = std::move(f5_result_cache_fifo_.front());
+                    f5_result_cache_fifo_.pop_front();
+                    f5_result_cache_.erase(evict);
+                }
+                f5_result_cache_fifo_.push_back(cache_key);
+                f5_result_cache_.emplace(cache_key, std::move(entry));
+            } else {
+                cache_it->second = std::move(entry);
+            }
+            if (profile != nullptr) {
+                profile->total_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+            }
+            active_profile_ = nullptr;
+            return;
+        }
+    }
+
+    const bool can_use_daat_wand =
+        !scoring_terms.empty() &&
+        (scoring_terms.size() <= k_daat_max_terms ||
+         (!plan.prefix_terms.empty() && plan.substring_terms.empty() &&
+          scoring_terms.size() <= k_prefix_daat_max_terms)) &&
+        plan.sort_mode == F5SortMode::Relevance &&
+        (plan.phrases.empty() || plan.boolean_mode == F5BooleanMode::Or) &&
+        requested_topk > 0;
+    if (can_use_daat_wand) {
+        std::vector<std::pair<std::string_view, float>> wand_terms;
+        wand_terms.reserve(scoring_terms.size());
+        for (const F5ScoringTerm& st : scoring_terms) {
+            wand_terms.push_back({st.term, st.query_boost});
+        }
+        std::vector<ScoreDoc> fast_ordered;
+        std::size_t fast_total_hits = 0;
+        const bool require_all_terms = (plan.boolean_mode == F5BooleanMode::And);
+        std::size_t fast_requested_topk = requested_topk;
+        if (!plan.phrases.empty()) {
+            constexpr std::size_t kPhraseCandidateMultiplier = 16;
+            constexpr std::size_t kPhraseCandidateFloor = 256;
+            constexpr std::size_t kPhraseCandidateCap = 4096;
+            fast_requested_topk = std::min<std::size_t>(
+                kPhraseCandidateCap,
+                std::max<std::size_t>(requested_topk * kPhraseCandidateMultiplier, kPhraseCandidateFloor));
+        }
+        const auto t_score0 = std::chrono::steady_clock::now();
+        if (try_search_f5_daat_wand(wand_terms, require_all_terms, fast_requested_topk, fast_ordered, fast_total_hits,
+                                    profile)) {
+            if (!plan.phrases.empty()) {
+                constexpr float kPhraseBoost = 0.85f;
+                StringArena phrase_check_arena(256u * 1024u);
+                std::size_t checked_docs = 0;
+                std::vector<ScoreDoc> phrase_hits;
+                std::vector<ScoreDoc> phrase_fillers;
+                phrase_hits.reserve(fast_ordered.size());
+                phrase_fillers.reserve(fast_ordered.size());
+                for (ScoreDoc& e : fast_ordered) {
+                    if (e.second >= forward_index_.size()) {
+                        phrase_fillers.push_back(e);
+                        continue;
+                    }
+                    const Document& doc = forward_index_[e.second];
+                    if (doc.title.empty()) {
+                        phrase_fillers.push_back(e);
+                        continue;
+                    }
+                    const std::vector<std::string_view> doc_terms =
+                        Analyzer::normalize_and_tokenize(doc.title, phrase_check_arena);
+                    if (doc_terms.empty()) {
+                        phrase_fillers.push_back(e);
+                        continue;
+                    }
+                    float phrase_gain = 0.0f;
+                    for (const auto& phrase : plan.phrases) {
+                        if (contains_phrase(doc_terms, phrase)) {
+                            phrase_gain += kPhraseBoost * static_cast<float>(phrase.size());
+                        }
+                    }
+                    e.first += phrase_gain;
+                    if (phrase_gain > 0.0f) {
+                        phrase_hits.push_back(e);
+                    } else {
+                        phrase_fillers.push_back(e);
+                    }
+                    ++checked_docs;
+                    if ((checked_docs & 1023u) == 0u) {
+                        phrase_check_arena.reset();
+                    }
+                }
+                sort_f5_daat_results(phrase_hits);
+                sort_f5_daat_results(phrase_fillers);
+                fast_ordered.clear();
+                fast_ordered.reserve(std::min<std::size_t>(
+                    requested_topk, phrase_hits.size() + phrase_fillers.size()));
+                for (const ScoreDoc& e : phrase_hits) {
+                    if (fast_ordered.size() >= requested_topk) {
+                        break;
+                    }
+                    fast_ordered.push_back(e);
+                }
+                for (const ScoreDoc& e : phrase_fillers) {
+                    if (fast_ordered.size() >= requested_topk) {
+                        break;
+                    }
+                    fast_ordered.push_back(e);
+                }
+                if (fast_ordered.size() > requested_topk) {
+                    fast_ordered.resize(requested_topk);
+                }
+            }
+            if (profile != nullptr) {
+                profile->score_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_score0).count();
+            }
+            const F5ExecPath daat_path =
+                !plan.phrases.empty() ? F5ExecPath::PhraseDaat
+                : !plan.prefix_terms.empty() ? F5ExecPath::PrefixDaat
+                                      : (require_all_terms ? F5ExecPath::DaatWandAnd : F5ExecPath::DaatWandOr);
+            emit_ranked_results(fast_ordered, fast_total_hits, scoring_terms.size(), fuzzy_rewrite_count, false,
+                                daat_path);
+
+            F5ResultCacheEntry entry;
+            entry.total_hits = fast_total_hits;
+            entry.matched_query_terms = scoring_terms.size();
+            entry.fuzzy_rewrite_count = fuzzy_rewrite_count;
+            const std::size_t keep_docs = std::min<std::size_t>(fast_ordered.size(), k_f5_result_cache_doc_cap);
+            entry.ordered_prefix.assign(fast_ordered.begin(),
+                                        fast_ordered.begin() + static_cast<std::ptrdiff_t>(keep_docs));
+            auto cache_it = f5_result_cache_.find(cache_key);
+            if (cache_it == f5_result_cache_.end()) {
+                while (f5_result_cache_.size() >= k_f5_result_cache_cap && !f5_result_cache_fifo_.empty()) {
+                    const std::string evict = std::move(f5_result_cache_fifo_.front());
+                    f5_result_cache_fifo_.pop_front();
+                    f5_result_cache_.erase(evict);
+                }
+                f5_result_cache_fifo_.push_back(cache_key);
+                f5_result_cache_.emplace(cache_key, std::move(entry));
+            } else {
+                cache_it->second = std::move(entry);
+            }
+            if (profile != nullptr) {
+                profile->total_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+            }
+            active_profile_ = nullptr;
+            return;
+        }
+    }
+
+    if (can_use_single_term_blockmax) {
+        std::vector<ScoreDoc> fast_ordered;
+        std::size_t fast_total_hits = 0;
+        const auto t_score0 = std::chrono::steady_clock::now();
+        if (try_search_f5_single_term_blockmax(scoring_terms.front().term, scoring_terms.front().query_boost,
+                                               requested_topk, fast_ordered, fast_total_hits, profile)) {
+            if (profile != nullptr) {
+                profile->score_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_score0).count();
+            }
+            emit_ranked_results(fast_ordered, fast_total_hits, 1u, fuzzy_rewrite_count, false,
+                                F5ExecPath::SingleTermBlockmax);
+
+            F5ResultCacheEntry entry;
+            entry.total_hits = fast_total_hits;
+            entry.matched_query_terms = 1u;
+            entry.fuzzy_rewrite_count = fuzzy_rewrite_count;
+            const std::size_t keep_docs = std::min<std::size_t>(fast_ordered.size(), k_f5_result_cache_doc_cap);
+            entry.ordered_prefix.assign(fast_ordered.begin(), fast_ordered.begin() + static_cast<std::ptrdiff_t>(keep_docs));
+            auto cache_it = f5_result_cache_.find(cache_key);
+            if (cache_it == f5_result_cache_.end()) {
+                while (f5_result_cache_.size() >= k_f5_result_cache_cap && !f5_result_cache_fifo_.empty()) {
+                    const std::string evict = std::move(f5_result_cache_fifo_.front());
+                    f5_result_cache_fifo_.pop_front();
+                    f5_result_cache_.erase(evict);
+                }
+                f5_result_cache_fifo_.push_back(cache_key);
+                f5_result_cache_.emplace(cache_key, std::move(entry));
+            } else {
+                cache_it->second = std::move(entry);
+            }
+            if (profile != nullptr) {
+                profile->total_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+            }
+            active_profile_ = nullptr;
+            return;
+        }
+    }
+    const bool can_use_or_blockmax =
+        scoring_terms.size() > 1 &&
+        scoring_terms.size() <= 8 &&
+        plan.boolean_mode == F5BooleanMode::Or &&
+        plan.sort_mode == F5SortMode::Relevance &&
+        plan.phrases.empty() &&
+        requested_topk > 0;
+    if (can_use_or_blockmax) {
+        std::vector<std::pair<std::string_view, float>> wand_terms;
+        wand_terms.reserve(scoring_terms.size());
+        for (const F5ScoringTerm& st : scoring_terms) {
+            wand_terms.push_back({st.term, st.query_boost});
+        }
+        std::vector<ScoreDoc> fast_ordered;
+        std::size_t fast_total_hits = 0;
+        const auto t_score0 = std::chrono::steady_clock::now();
+        if (try_search_f5_or_blockmax(wand_terms, requested_topk, fast_ordered, fast_total_hits, profile)) {
+            if (profile != nullptr) {
+                profile->score_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_score0).count();
+            }
+            emit_ranked_results(fast_ordered, fast_total_hits, scoring_terms.size(), fuzzy_rewrite_count, false,
+                                F5ExecPath::OrBlockmax);
+
+            F5ResultCacheEntry entry;
+            entry.total_hits = fast_total_hits;
+            entry.matched_query_terms = scoring_terms.size();
+            entry.fuzzy_rewrite_count = fuzzy_rewrite_count;
+            const std::size_t keep_docs = std::min<std::size_t>(fast_ordered.size(), k_f5_result_cache_doc_cap);
+            entry.ordered_prefix.assign(fast_ordered.begin(), fast_ordered.begin() + static_cast<std::ptrdiff_t>(keep_docs));
+            auto cache_it = f5_result_cache_.find(cache_key);
+            if (cache_it == f5_result_cache_.end()) {
+                while (f5_result_cache_.size() >= k_f5_result_cache_cap && !f5_result_cache_fifo_.empty()) {
+                    const std::string evict = std::move(f5_result_cache_fifo_.front());
+                    f5_result_cache_fifo_.pop_front();
+                    f5_result_cache_.erase(evict);
+                }
+                f5_result_cache_fifo_.push_back(cache_key);
+                f5_result_cache_.emplace(cache_key, std::move(entry));
+            } else {
+                cache_it->second = std::move(entry);
+            }
+            if (profile != nullptr) {
+                profile->total_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+            }
+            active_profile_ = nullptr;
+            return;
+        }
+    }
+
+    const auto t_score0 = std::chrono::steady_clock::now();
+    std::vector<DocID> modified_docs;
+    modified_docs.reserve(4096);
+    std::unordered_map<DocID, std::uint16_t> and_hits;
+    if (plan.boolean_mode == F5BooleanMode::And) {
+        and_hits.reserve(4096);
+    }
+
+    const double N = static_cast<double>(n);
+    std::size_t matched_query_terms = 0;
+
+    for (const F5ScoringTerm& qterm : scoring_terms) {
+        const std::string_view term = qterm.term;
+        const std::vector<Posting>* plist = get_keyword_postings(term);
+        if (plist == nullptr || plist->empty()) {
+            continue;
+        }
+        ++matched_query_terms;
+        const double df = static_cast<double>(plist->size());
+        const double df_ratio = (N > 0.0) ? (df / N) : 0.0;
+        const float penalty = f5_high_df_penalty(df_ratio) * (is_f5_query_stopword(term) ? 0.35f : 1.0f);
+        const float idf = static_cast<float>(std::log((N - df + 0.5) / (df + 0.5) + 1.0)) * penalty * qterm.query_boost;
+
+        if (profile != nullptr) {
+            profile->postings_visited += plist->size();
+        }
+        for (const Posting& po : *plist) {
+            const DocID did = po.doc_id;
+            if (did >= forward_index_.size()) {
+                continue;
+            }
+            if (profile != nullptr) {
+                profile->postings_scored += 1;
+            }
+            const float dl =
+                static_cast<float>(std::max<std::uint32_t>(1u, forward_index_[did].doc_length));
+            const float avdl = avg_dl_ > 0.0f ? avg_dl_ : 1.0f;
+            const float K = k_bm25_k1 * ((1.0f - k_bm25_b) + k_bm25_b * (dl / avdl));
+            const float tf = static_cast<float>(po.tf);
+            const float inc = idf * (tf * (k_bm25_k1 + 1.0f)) / (tf + K);
+
+            const float prev = scoring_board_[did];
+            scoring_board_[did] = prev + inc;
+            if (prev == 0.0f) {
+                modified_docs.push_back(did);
+            }
+            if (plan.boolean_mode == F5BooleanMode::And) {
+                ++and_hits[did];
+            }
+        }
+    }
+    if (profile != nullptr) {
+        profile->score_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_score0).count();
+        profile->docs_touched = modified_docs.size();
+    }
+
+    if (matched_query_terms == 0) {
+        if (opts.emit_results) {
+            os << "未找到匹配结果。\n";
+        }
+        if (profile != nullptr) {
+            profile->path = F5ExecPath::NoHits;
+            profile->total_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+        }
+        active_profile_ = nullptr;
+        return;
+    }
+
+    if (!plan.phrases.empty() && !modified_docs.empty()) {
+        // Phrase hits provide an extra relevance signal on top of BM25.
+        constexpr float kPhraseBoost = 0.85f;
+        StringArena phrase_check_arena(256u * 1024u);
+        std::size_t checked_docs = 0;
+        for (const DocID did : modified_docs) {
+            if (did >= forward_index_.size()) {
+                continue;
+            }
+            const Document& doc = forward_index_[did];
+            if (doc.title.empty()) {
+                continue;
+            }
+            const std::vector<std::string_view> doc_terms = Analyzer::normalize_and_tokenize(doc.title, phrase_check_arena);
+            if (doc_terms.empty()) {
+                continue;
+            }
+            float phrase_gain = 0.0f;
+            for (const auto& phrase : plan.phrases) {
+                if (contains_phrase(doc_terms, phrase)) {
+                    phrase_gain += kPhraseBoost * static_cast<float>(phrase.size());
+                }
+            }
+            scoring_board_[did] += phrase_gain;
+            ++checked_docs;
+            if ((checked_docs & 1023u) == 0u) {
+                phrase_check_arena.reset();
+            }
+        }
+    }
+
+    std::vector<ScoreDoc> ordered;
+    ordered.reserve(modified_docs.size());
+    for (const DocID did : modified_docs) {
+        if (plan.boolean_mode == F5BooleanMode::And) {
+            const auto it = and_hits.find(did);
+            if (it == and_hits.end() || it->second != matched_query_terms) {
+                continue;
+            }
+        }
+        const float s = scoring_board_[did];
+        ordered.push_back({s, did});
+    }
+
+    if (ordered.empty()) {
+        if (opts.emit_results) {
+            os << "未找到匹配结果。\n";
+        }
+        for (const DocID did : modified_docs) {
+            scoring_board_[did] = 0.0f;
+        }
+        if (profile != nullptr) {
+            profile->path = F5ExecPath::NoHits;
+            profile->total_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+        }
+        active_profile_ = nullptr;
+        return;
+    }
+
+    const auto t_rank0 = std::chrono::steady_clock::now();
+    const auto better = [&](const ScoreDoc& a, const ScoreDoc& b) {
+        if (plan.sort_mode == F5SortMode::Newest) {
+            const int ya = forward_index_[a.second].year;
+            const int yb = forward_index_[b.second].year;
+            if (ya != yb) {
+                return ya > yb;
+            }
+            if (a.first != b.first) {
+                return a.first > b.first;
+            }
+            return a.second < b.second;
+        }
+        if (a.first != b.first) {
+            return a.first > b.first;
+        }
+        const int ya = forward_index_[a.second].year;
+        const int yb = forward_index_[b.second].year;
+        if (ya != yb) {
+            return ya > yb;
+        }
+        return a.second < b.second;
+    };
+
+    const std::size_t total_hits = ordered.size();
+    std::size_t needed_topk = total_hits;
+    if (plan.page > 0 || plan.size > 0) {
+        const std::size_t page_size_req = plan.size > 0 ? plan.size : (plan.limit > 0 ? plan.limit : 20);
+        const std::size_t page_req = plan.page > 0 ? plan.page : 1;
+        needed_topk = std::min<std::size_t>(total_hits, page_req * page_size_req);
+    } else if (plan.limit > 0) {
+        needed_topk = std::min<std::size_t>(total_hits, plan.offset + plan.limit);
+    }
+    if (needed_topk < ordered.size()) {
+        std::nth_element(ordered.begin(), ordered.begin() + static_cast<std::ptrdiff_t>(needed_topk), ordered.end(), better);
+        ordered.resize(needed_topk);
+    }
+    std::sort(ordered.begin(), ordered.end(), better);
+    if (profile != nullptr) {
+        profile->rank_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_rank0).count();
+        profile->matched_query_terms = matched_query_terms;
+    }
+
+    emit_ranked_results(ordered, total_hits, matched_query_terms, fuzzy_rewrite_count, false, F5ExecPath::FullScan);
+
+    F5ResultCacheEntry entry;
+    entry.total_hits = total_hits;
+    entry.matched_query_terms = matched_query_terms;
+    entry.fuzzy_rewrite_count = fuzzy_rewrite_count;
+    const std::size_t keep_docs = std::min<std::size_t>(ordered.size(), k_f5_result_cache_doc_cap);
+    entry.ordered_prefix.assign(ordered.begin(), ordered.begin() + static_cast<std::ptrdiff_t>(keep_docs));
+    auto cache_it = f5_result_cache_.find(cache_key);
+    if (cache_it == f5_result_cache_.end()) {
+        while (f5_result_cache_.size() >= k_f5_result_cache_cap && !f5_result_cache_fifo_.empty()) {
+            const std::string evict = std::move(f5_result_cache_fifo_.front());
+            f5_result_cache_fifo_.pop_front();
+            f5_result_cache_.erase(evict);
+        }
+        f5_result_cache_fifo_.push_back(cache_key);
+        f5_result_cache_.emplace(cache_key, std::move(entry));
+    } else {
+        cache_it->second = std::move(entry);
+    }
+
+    for (const DocID did : modified_docs) {
+        scoring_board_[did] = 0.0f;
+    }
+
+    if (profile != nullptr) {
+        profile->total_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
+    }
+    active_profile_ = nullptr;
+}
+
+// ========== --serve 模式：结构化搜索输出（供 Python 后端调用） ==========
+// 输出格式: 每行 DOC\tid\ttitle\tyear\tjournal\tauthors\tee，以 END 结束
+
+namespace {
+
+void serve_emit_doc(const Document& doc, std::ostream& os) {
+    os << "DOC\t" << doc.id << '\t';
+    // 字段中 \t \n \r 替换为空格，避免破坏 TSV 格式
+    auto safe = [&os](std::string_view s) {
+        for (char c : s) {
+            if (c == '\t' || c == '\n' || c == '\r') os << ' ';
+            else os << c;
+        }
+    };
+    safe(doc.title.empty() ? std::string_view{"-"} : doc.title);
+    os << '\t';
+    os << doc.year << '\t';
+    safe(doc.journal.empty() ? std::string_view{"-"} : doc.journal);
+    os << '\t';
+    safe(doc.authors.empty() ? std::string_view{"-"} : doc.authors);
+    os << '\t';
+    safe(doc.ee.empty() ? std::string_view{"-"} : doc.ee);
+    os << '\n';
+}
+
+} // namespace
+
+void ExtremeEngine::serve_search_author(std::string_view query, std::ostream& os) const {
+    const std::string_view key = build_normalized_lookup_key(query);
+    if (key.empty()) {
+        os << "ERROR\t查询无效\nEND\n";
+        return;
+    }
+    if (const std::vector<Posting>* plist = author_global_.find(key); plist != nullptr && !plist->empty()) {
+        os << "AUTHOR\t" << key << '\t' << plist->size() << '\n';
+        std::size_t emitted = 0;
+        for (const Posting& po : *plist) {
+            if (po.doc_id >= forward_index_.size()) continue;
+            serve_emit_doc(forward_index_[po.doc_id], os);
+            if (++emitted >= 500) break; // 限制 500 条
+        }
+        os << "END\n";
+        return;
+    }
+    // 简单容错：按 token 匹配（所有 query token 必须在 author name 中出现）
+    std::string key_lower(key);
+    std::vector<std::string_view> query_tokens;
+    {
+        std::size_t p = 0;
+        while (p < key_lower.size()) {
+            while (p < key_lower.size() && key_lower[p] == ' ') ++p;
+            if (p >= key_lower.size()) break;
+            std::size_t e = p;
+            while (e < key_lower.size() && key_lower[e] != ' ') ++e;
+            query_tokens.emplace_back(key_lower.data() + p, e - p);
+            p = e;
+        }
+    }
+    std::vector<std::pair<std::string_view, std::size_t>> candidates;
+    author_global_.for_each([&](const std::string_view author, const std::vector<Posting>& posts) {
+        if (candidates.size() >= 20) return;
+        std::string alower(author);
+        bool all_match = true;
+        for (std::string_view tok : query_tokens) {
+            if (alower.find(tok) == std::string::npos) {
+                all_match = false;
+                break;
+            }
+        }
+        if (all_match) {
+            candidates.emplace_back(author, posts.size());
+        }
+    });
+    if (candidates.empty()) {
+        os << "ERROR\t未找到匹配作者\nEND\n";
+        return;
+    }
+    // 取 paper_count 最大的
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    const std::string_view best = candidates.front().first;
+    const std::vector<Posting>* plist2 = author_global_.find(best);
+    os << "FUZZY\t" << key << '\t' << best << '\t' << plist2->size() << '\n';
+    std::size_t emitted = 0;
+    for (const Posting& po : *plist2) {
+        if (po.doc_id >= forward_index_.size()) continue;
+        serve_emit_doc(forward_index_[po.doc_id], os);
+        if (++emitted >= 500) break;
+    }
+    os << "END\n";
+}
+
+void ExtremeEngine::serve_search_title(std::string_view query, std::ostream& os) const {
+    // 使用 keyword_global_ 索引加速：找到包含 query 中任意 token 的候选文档，再做子串匹配
+    std::string qlower(query);
+    for (char& c : qlower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    // Tokenize query
+    std::vector<std::string_view> qtokens;
+    {
+        std::size_t p = 0;
+        while (p < qlower.size()) {
+            while (p < qlower.size() && qlower[p] == ' ') ++p;
+            if (p >= qlower.size()) break;
+            std::size_t e = p;
+            while (e < qlower.size() && qlower[e] != ' ') ++e;
+            qtokens.emplace_back(qlower.data() + p, e - p);
+            p = e;
+        }
+    }
+
+    // 使用 keyword_global_ 找候选文档
+    std::unordered_set<DocID> candidates;
+    for (std::string_view tok : qtokens) {
+        const std::vector<Posting>* plist = keyword_global_.find(tok);
+        if (plist != nullptr) {
+            for (const Posting& po : *plist) {
+                if (po.doc_id < forward_index_.size()) {
+                    candidates.insert(po.doc_id);
+                    if (candidates.size() >= 20000) break; // 候选集上限
+                }
+            }
+        }
+        if (candidates.size() >= 20000) break;
+    }
+
+    std::size_t emitted = 0;
+    auto emit_if_match = [&](DocID doc_id) {
+        if (emitted >= 500) return;
+        const Document& doc = forward_index_[doc_id];
+        if (doc.title.empty()) return;
+        std::string tlower(doc.title);
+        for (char& c : tlower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (tlower.find(qlower) != std::string::npos) {
+            serve_emit_doc(doc, os);
+            ++emitted;
+        }
+    };
+
+    if (!candidates.empty()) {
+        for (DocID id : candidates) emit_if_match(id);
+    } else {
+        // 无候选时回退全量扫描
+        for (const Document& doc : forward_index_) {
+            if (emitted >= 500) break;
+            if (doc.title.empty()) continue;
+            std::string tlower(doc.title);
+            for (char& c : tlower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (tlower.find(qlower) != std::string::npos) {
+                serve_emit_doc(doc, os);
+                ++emitted;
+            }
+        }
+    }
+    os << "END\n";
+}
+
+void ExtremeEngine::serve_search_bm25(std::string_view query, std::ostream& os) const {
+    // 使用 keyword_global_ 索引加速
+    std::vector<std::string_view> terms;
+    {
+        std::string qcopy(query);
+        for (char& c : qcopy) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        std::size_t pos = 0;
+        while (pos < qcopy.size()) {
+            while (pos < qcopy.size() && qcopy[pos] == ' ') ++pos;
+            if (pos >= qcopy.size()) break;
+            std::size_t end = pos;
+            while (end < qcopy.size() && qcopy[end] != ' ') ++end;
+            terms.emplace_back(qcopy.data() + pos, end - pos);
+            pos = end;
+        }
+    }
+    if (terms.empty()) {
+        os << "ERROR\t查询为空\nEND\n";
+        return;
+    }
+
+    // 候选文档及命中统计
+    std::unordered_map<DocID, std::size_t> hit_map;
+    for (std::string_view tok : terms) {
+        const std::vector<Posting>* plist = keyword_global_.find(tok);
+        if (plist != nullptr) {
+            for (const Posting& po : *plist) {
+                if (po.doc_id < forward_index_.size()) {
+                    ++hit_map[po.doc_id];
+                    if (hit_map.size() >= 50000) break;
+                }
+            }
+        }
+        if (hit_map.size() >= 50000) break;
+    }
+
+    // 按命中数排序
+    std::vector<std::pair<std::size_t, DocID>> scored;
+    scored.reserve(hit_map.size());
+    for (const auto& [doc_id, hits] : hit_map) {
+        scored.emplace_back(hits, doc_id);
+    }
+    std::sort(scored.begin(), scored.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    std::size_t emitted = 0;
+    for (const auto& [score, doc_id] : scored) {
+        if (doc_id >= forward_index_.size()) continue;
+        serve_emit_doc(forward_index_[doc_id], os);
+        if (++emitted >= 500) break;
+    }
+    os << "END\n";
+}
+
+void ExtremeEngine::serve_ego_network(std::string_view raw_name, std::ostream& os) const {
+    const std::string_view key = build_normalized_lookup_key(raw_name);
+    if (key.empty()) {
+        os << "ERROR\t作者名无效\nEND\n";
+        return;
+    }
+    const auto* plist = author_global_.find(key);
+    if (plist == nullptr || plist->empty()) {
+        os << "ERROR\t未找到作者: " << raw_name << "\nEND\n";
+        return;
+    }
+
+    constexpr std::size_t kMaxNeighbors = 50;
+    StringArena local_norm(256u * 1024u);
+    std::unordered_map<std::string, std::string> display_by_norm;
+    std::unordered_map<std::string, std::vector<DocID>> docs_by_norm;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::uint32_t>> edge_w;
+
+    const std::string center_norm{key};
+    std::string center_display;
+
+    for (const Posting& po : *plist) {
+        if (po.doc_id >= forward_index_.size()) continue;
+        const Document& doc = forward_index_[po.doc_id];
+        if (doc.authors.empty()) continue;
+
+        std::vector<std::string> doc_norms;
+        std::vector<std::string_view> doc_displays;
+        doc_norms.reserve(8);
+        doc_displays.reserve(8);
+
+        for_each_author_segment(doc.authors, [&](std::string_view seg) {
+            const std::string_view trimmed = trim_sv(seg);
+            if (trimmed.empty()) return;
+            const std::string_view nk = normalized_span(local_norm, trimmed);
+            if (nk.empty()) return;
+            std::string nk_str{nk};
+            display_by_norm.try_emplace(nk_str, std::string{trimmed});
+            doc_norms.push_back(std::move(nk_str));
+            doc_displays.push_back(trimmed);
+        });
+
+        bool contains_center = false;
+        for (const std::string& nk : doc_norms) if (nk == center_norm) { contains_center = true; break; }
+        if (!contains_center) continue;
+
+        if (center_display.empty()) {
+            for (std::size_t k = 0; k < doc_norms.size(); ++k) {
+                if (doc_norms[k] == center_norm) { center_display = std::string{doc_displays[k]}; break; }
+            }
+        }
+
+        for (const std::string& nk : doc_norms) docs_by_norm[nk].push_back(doc.id);
+        for (std::size_t a = 0; a < doc_norms.size(); ++a) {
+            for (std::size_t b = a + 1; b < doc_norms.size(); ++b) {
+                const std::string& na = doc_norms[a];
+                const std::string& nb = doc_norms[b];
+                if (na == nb) continue;
+                const std::string& lo = na < nb ? na : nb;
+                const std::string& hi = na < nb ? nb : na;
+                ++edge_w[lo][hi];
+            }
+        }
+    }
+
+    if (center_display.empty()) center_display = std::string{key};
+
+    // 50-合作者上限
+    std::unordered_set<std::string> keep;
+    keep.insert(center_norm);
+    {
+        std::vector<std::pair<std::uint32_t, std::string>> weighted;
+        weighted.reserve(display_by_norm.size());
+        for (const auto& kv : display_by_norm) {
+            if (kv.first == center_norm) continue;
+            std::uint32_t w = 0;
+            const std::string& lo = center_norm < kv.first ? center_norm : kv.first;
+            const std::string& hi = center_norm < kv.first ? kv.first : center_norm;
+            if (auto it = edge_w.find(lo); it != edge_w.end()) {
+                if (auto jt = it->second.find(hi); jt != it->second.end()) w = jt->second;
+            }
+            weighted.emplace_back(w, kv.first);
+        }
+        std::sort(weighted.begin(), weighted.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+        if (weighted.size() > kMaxNeighbors) weighted.resize(kMaxNeighbors);
+        for (auto& p : weighted) keep.insert(std::move(p.second));
+    }
+
+    for (auto it = display_by_norm.begin(); it != display_by_norm.end(); ) {
+        if (keep.find(it->first) == keep.end()) it = display_by_norm.erase(it); else ++it;
+    }
+    for (auto it = docs_by_norm.begin(); it != docs_by_norm.end(); ) {
+        if (keep.find(it->first) == keep.end()) it = docs_by_norm.erase(it); else ++it;
+    }
+    for (auto it = edge_w.begin(); it != edge_w.end(); ) {
+        if (keep.find(it->first) == keep.end()) { it = edge_w.erase(it); continue; }
+        for (auto jt = it->second.begin(); jt != it->second.end(); ) {
+            if (keep.find(jt->first) == keep.end()) jt = it->second.erase(jt); else ++jt;
+        }
+        ++it;
+    }
+
+    // 构建 JSON 字符串
+    std::string json;
+    json.reserve(256 * 1024);
+    auto append_json = [&](const char* s) { json.append(s); };
+    auto write_json_str = [&](std::string_view s) {
+        json.push_back('"');
+        for (char c : s) {
+            switch (c) {
+                case '"': json += "\\\""; break;
+                case '\\': json += "\\\\"; break;
+                case '\n': json += "\\n"; break;
+                case '\r': json += "\\r"; break;
+                case '\t': json += "\\t"; break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20) {
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+                        json.append(buf);
+                    } else {
+                        json.push_back(c);
+                    }
+            }
+        }
+        json.push_back('"');
+    };
+
+    std::vector<std::string> node_norms;
+    node_norms.reserve(display_by_norm.size());
+    for (const auto& kv : display_by_norm) node_norms.push_back(kv.first);
+    std::sort(node_norms.begin(), node_norms.end(), [&](const std::string& a, const std::string& b) {
+        if (a == center_norm) return true;
+        if (b == center_norm) return false;
+        return display_by_norm[a] < display_by_norm[b];
+    });
+
+    append_json("{\"center\":");
+    write_json_str(center_display);
+    append_json(",\"nodes\":[");
+    for (std::size_t ni = 0; ni < node_norms.size(); ++ni) {
+        const std::string& nk = node_norms[ni];
+        const std::string& disp = display_by_norm[nk];
+        std::size_t pc = 0;
+        if (const auto* gp = author_global_.find(std::string_view{nk}); gp != nullptr) pc = gp->size();
+        append_json("{\"id\":");
+        write_json_str(disp);
+        char num_buf[32];
+        std::snprintf(num_buf, sizeof(num_buf), ", \"paper_count\":%zu}", pc);
+        append_json(num_buf);
+        if (ni + 1 < node_norms.size()) json.push_back(',');
+    }
+    append_json("],\"edges\":[");
+
+    std::size_t total_edges = 0;
+    for (const auto& kv : edge_w) total_edges += kv.second.size();
+    std::size_t edges_written = 0;
+    for (const auto& kv : edge_w) {
+        const std::string& src_disp = display_by_norm[kv.first];
+        for (const auto& kw : kv.second) {
+            const std::string& dst_disp = display_by_norm[kw.first];
+            char ebuf[128];
+            std::snprintf(ebuf, sizeof(ebuf), "{\"source\":");
+            append_json(ebuf);
+            write_json_str(src_disp);
+            append_json(",\"target\":");
+            write_json_str(dst_disp);
+            std::snprintf(ebuf, sizeof(ebuf), ",\"weight\":%u}", kw.second);
+            append_json(ebuf);
+            ++edges_written;
+            if (edges_written < total_edges) json.push_back(',');
+        }
+    }
+    append_json("],\"papers_by_author\":{");
+
+    std::vector<std::string> author_order;
+    author_order.push_back(center_norm);
+    for (const std::string& nk : node_norms) {
+        if (nk != center_norm && docs_by_norm.count(nk) > 0) author_order.push_back(nk);
+    }
+    for (std::size_t ai = 0; ai < author_order.size(); ++ai) {
+        const std::string& nk = author_order[ai];
+        const std::string& disp = display_by_norm.count(nk) ? display_by_norm[nk] : nk;
+        const auto& ids = docs_by_norm[nk];
+        write_json_str(disp);
+        append_json(":[");
+        std::vector<DocID> uniq_ids = ids;
+        std::sort(uniq_ids.begin(), uniq_ids.end());
+        uniq_ids.erase(std::unique(uniq_ids.begin(), uniq_ids.end()), uniq_ids.end());
+        for (std::size_t pi = 0; pi < uniq_ids.size(); ++pi) {
+            if (uniq_ids[pi] >= forward_index_.size()) continue;
+            const Document& doc = forward_index_[uniq_ids[pi]];
+            char dbuf[64];
+            append_json("{\"doc_id\":");
+            std::snprintf(dbuf, sizeof(dbuf), "%u", static_cast<unsigned>(doc.id));
+            append_json(dbuf);
+            append_json(",\"title\":");
+            write_json_str(doc.title);
+            append_json(",\"year\":");
+            std::snprintf(dbuf, sizeof(dbuf), "%u", static_cast<unsigned>(doc.year));
+            append_json(dbuf);
+            append_json(",\"journal\":");
+            write_json_str(doc.journal);
+            append_json(",\"ee\":");
+            write_json_str(doc.ee);
+            append_json("}");
+            if (pi + 1 < uniq_ids.size()) json.push_back(',');
+        }
+        append_json("]");
+        if (ai + 1 < author_order.size()) json.push_back(',');
+    }
+    append_json("}}");
+
+    os << "EGO\t" << json << "\nEND\n";
+}
+
+void ExtremeEngine::execute_f3_author_stats() const {
+    const auto t0 = std::chrono::steady_clock::now();
+
+    const auto t_compute = std::chrono::steady_clock::now();
+    const auto compute_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t_compute - t0).count();
+
+    std::cout << "\n========== 发文量最高的 100 位作者 ==========\n";
+    std::cout << "[计时] 统计耗时: " << compute_ms << " ms\n\n";
+
+    if (f3_top100_cache_.empty()) {
+        std::cout << "（暂无作者索引数据）\n";
+    } else {
+        std::size_t rank = 1;
+        for (const auto& entry : f3_top100_cache_) {
+            std::cout << '[' << rank << "] " << entry.second << ": " << entry.first << " 篇论文\n";
+            ++rank;
+        }
+    }
+
+    const auto t_done = std::chrono::steady_clock::now();
+    const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_done - t0).count();
+    std::cout << "\n[计时] 总耗时（含输出）: " << total_ms << " ms\n";
+}
+
+void ExtremeEngine::execute_f4_conference_analytics() const {
+    const auto t0 = std::chrono::steady_clock::now();
+
+    std::cout << "请输入目标年份（如 2023）: ";
+    int target_year = 0;
+    if (!(std::cin >> target_year)) {
+        std::cin.clear();
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        std::cout << "输入无效，年份应为整数。\n";
+        return;
+    }
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+    const auto docs_it = year_doc_index_.find(target_year);
+    const std::size_t matched_docs = docs_it == year_doc_index_.end() ? 0 : docs_it->second.size();
+
+    auto cache_it = f4_top10_cache_.find(target_year);
+    if (cache_it == f4_top10_cache_.end()) {
+        cache_it = f4_top10_cache_.emplace(target_year, compute_f4_top10_for_year(target_year)).first;
+    }
+    const std::vector<F4HotEntry>& ranked = cache_it->second;
+
+    std::cout << "\n========== 年度热词分析 ==========\n";
+    std::cout << "[年份] " << target_year << '\n';
+    std::cout << "[匹配文档数] " << matched_docs << "\n\n";
+
+    if (ranked.empty()) {
+        std::cout << "未统计到可用热词。\n";
+    } else {
+        std::size_t rank = 1;
+        for (const auto& entry : ranked) {
+            std::cout << '[' << rank << "] 关键词: " << entry.term << "（频次: " << entry.freq << "）\n";
+
+            if (!kF4FastModeDisableEvidence) {
+                constexpr std::size_t kEvidenceLimit = 3;
+                if (const std::vector<Posting>* plist = keyword_global_.find(entry.term); plist != nullptr) {
+                    std::size_t emitted = 0;
+                    for (const Posting& posting : *plist) {
+                        if (posting.doc_id >= forward_index_.size()) {
+                            continue;
+                        }
+                        const Document& doc = forward_index_[posting.doc_id];
+                        if (doc.year != target_year || doc.title.empty()) {
+                            continue;
+                        }
+                        std::cout << "    - 证据: " << doc.title << '\n';
+                        ++emitted;
+                        if (emitted >= kEvidenceLimit) {
+                            break;
+                        }
+                    }
+                }
+            }
+            ++rank;
+        }
+        if (kF4FastModeDisableEvidence) {
+            std::cout << "\n[快速模式] 证据标题回扫已禁用，以压缩 F4 到亚秒级响应。\n";
+        }
+    }
+
+    const auto t1 = std::chrono::steady_clock::now();
+    const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    std::cout << "\n[计时] F4 执行总耗时: " << total_ms << " ms\n";
+}
+
+void ExtremeEngine::execute_f6_author_local_maximal_cliques(const std::string_view target_author_raw) const {
+    const auto t0 = std::chrono::steady_clock::now();
+    std::cout << "[模式] 目标作者局部合作网络 + bitset Bron-Kerbosch + pivot，统计局部极大完全子图。\n";
+
+    const std::string_view target_key = build_normalized_lookup_key(target_author_raw);
+    if (target_key.empty()) {
+        std::cout << "查询无效（无法规范化目标作者）。\n";
+        return;
+    }
+    const std::vector<Posting>* plist = author_global_.find(target_key);
+    if (plist == nullptr || plist->empty()) {
+        std::cout << "未找到该作者的文献记录。\n";
+        return;
+    }
+
+    StringArena local_norm_arena(256u * 1024u);
+    std::unordered_map<std::string_view, int> local_id;
+    local_id.reserve(512);
+    local_id.emplace(target_key, 0);
+    std::vector<std::vector<int>> target_docs_ids;
+    target_docs_ids.reserve(plist->size());
+
+    for (const Posting& po : *plist) {
+        if (po.doc_id >= forward_index_.size()) {
+            continue;
+        }
+        const Document& doc = forward_index_[po.doc_id];
+        if (doc.authors.empty()) {
+            continue;
+        }
+
+        std::vector<int> doc_ids;
+        doc_ids.reserve(16);
+        bool contains_target = false;
+        for_each_author_segment(doc.authors, [&](const std::string_view seg) {
+            const std::string_view trimmed = trim_sv(seg);
+            if (trimmed.empty()) {
+                return;
+            }
+            const std::string_view nk = normalized_span(local_norm_arena, trimmed);
+            if (nk.empty()) {
+                return;
+            }
+            auto it = local_id.find(nk);
+            int id = 0;
+            if (it == local_id.end()) {
+                id = static_cast<int>(local_id.size());
+                local_id.emplace(nk, id);
+            } else {
+                id = it->second;
+            }
+            doc_ids.push_back(id);
+            if (id == 0) {
+                contains_target = true;
+            }
+        });
+        if (!contains_target || doc_ids.empty()) {
+            continue;
+        }
+        std::sort(doc_ids.begin(), doc_ids.end());
+        doc_ids.erase(std::unique(doc_ids.begin(), doc_ids.end()), doc_ids.end());
+        target_docs_ids.push_back(std::move(doc_ids));
+    }
+
+    const int n = static_cast<int>(local_id.size());
+    std::cout << "[局部网络] 节点数=" << n << "，目标作者论文数=" << plist->size() << '\n';
+    if (n < 3) {
+        std::cout << "节点数不足 3，无法形成规模 >= 3 的极大完全子图。\n";
+        return;
+    }
+
+    using Bitset = std::vector<std::uint64_t>;
+    const std::size_t words = static_cast<std::size_t>((n + 63) / 64);
+    std::vector<Bitset> adj(static_cast<std::size_t>(n), Bitset(words, 0ULL));
+    auto set_bit = [](Bitset& bits, const int v) {
+        bits[static_cast<std::size_t>(v >> 6)] |= (1ULL << static_cast<unsigned>(v & 63));
+    };
+    auto clear_bit = [](Bitset& bits, const int v) {
+        bits[static_cast<std::size_t>(v >> 6)] &= ~(1ULL << static_cast<unsigned>(v & 63));
+    };
+    auto bitset_empty = [](const Bitset& bits) {
+        for (const std::uint64_t w : bits) {
+            if (w != 0ULL) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto bitset_or = [words](const Bitset& a, const Bitset& b) {
+        Bitset outv(words, 0ULL);
+        for (std::size_t i = 0; i < words; ++i) {
+            outv[i] = a[i] | b[i];
+        }
+        return outv;
+    };
+    auto bitset_and = [words](const Bitset& a, const Bitset& b) {
+        Bitset outv(words, 0ULL);
+        for (std::size_t i = 0; i < words; ++i) {
+            outv[i] = a[i] & b[i];
+        }
+        return outv;
+    };
+    auto bitset_and_not = [words](const Bitset& a, const Bitset& b) {
+        Bitset outv(words, 0ULL);
+        for (std::size_t i = 0; i < words; ++i) {
+            outv[i] = a[i] & ~b[i];
+        }
+        return outv;
+    };
+    auto popcount_intersection = [words](const Bitset& a, const Bitset& b) {
+        int cnt = 0;
+        for (std::size_t i = 0; i < words; ++i) {
+            cnt += static_cast<int>(std::popcount(a[i] & b[i]));
+        }
+        return cnt;
+    };
+    auto for_each_set_bit = [n](const Bitset& bits, auto&& fn) {
+        for (std::size_t wi = 0; wi < bits.size(); ++wi) {
+            std::uint64_t word = bits[wi];
+            while (word != 0ULL) {
+                const unsigned tz = static_cast<unsigned>(std::countr_zero(word));
+                const int v = static_cast<int>(wi * 64 + tz);
+                if (v < n) {
+                    fn(v);
+                }
+                word &= (word - 1ULL);
+            }
+        }
+    };
+
+    for (const std::vector<int>& ids : target_docs_ids) {
+        if (ids.size() < 2) {
+            continue;
+        }
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            for (std::size_t j = i + 1; j < ids.size(); ++j) {
+                const int u = ids[i];
+                const int v = ids[j];
+                set_bit(adj[static_cast<std::size_t>(u)], v);
+                set_bit(adj[static_cast<std::size_t>(v)], u);
+            }
+        }
+    }
+
+    std::map<int, unsigned long long, std::greater<int>> maximal_counts;
+    std::function<void(int, Bitset, Bitset)> bron_kerbosch;
+    bron_kerbosch = [&](const int clique_size, Bitset p, Bitset x) {
+        if (bitset_empty(p) && bitset_empty(x)) {
+            if (clique_size >= 3) {
+                ++maximal_counts[clique_size];
+            }
+            return;
+        }
+
+        int pivot = -1;
+        int max_deg_in_p = -1;
+        const Bitset px = bitset_or(p, x);
+        for_each_set_bit(px, [&](const int u) {
+            const int deg = popcount_intersection(p, adj[static_cast<std::size_t>(u)]);
+            if (deg > max_deg_in_p) {
+                max_deg_in_p = deg;
+                pivot = u;
+            }
+        });
+
+        Bitset candidates = (pivot == -1) ? p : bitset_and_not(p, adj[static_cast<std::size_t>(pivot)]);
+        for_each_set_bit(candidates, [&](const int v) {
+            const Bitset p_next = bitset_and(p, adj[static_cast<std::size_t>(v)]);
+            const Bitset x_next = bitset_and(x, adj[static_cast<std::size_t>(v)]);
+            bron_kerbosch(clique_size + 1, p_next, x_next);
+            clear_bit(p, v);
+            set_bit(x, v);
+        });
+    };
+
+    Bitset p = adj[0];
+    Bitset x(words, 0ULL);
+    clear_bit(p, 0);
+    bron_kerbosch(1, std::move(p), std::move(x));
+
+    std::cout << "[作者] " << target_key << '\n';
+    std::cout << "[说明] 这是包含目标作者的局部极大完全子图统计，不等同于所有子聚团数量。\n";
+    if (maximal_counts.empty()) {
+        std::cout << "未找到包含目标作者且规模 >= 3 的极大聚团。\n";
+    } else {
+        for (const auto& kv : maximal_counts) {
+            std::cout << kv.first << " 阶局部极大聚团: " << kv.second << '\n';
+        }
+        std::cout << "[最大局部极大聚团阶数] " << maximal_counts.begin()->first << '\n';
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    std::cout << "[计时] F6 作者局部极大聚团分析耗时: " << total_ms << " ms\n";
+}
+
+void ExtremeEngine::serve_f6_clique(std::uint32_t max_order, std::ostream& os) const {
+    if (max_order < 2) max_order = 2;
+    if (max_order > 128) max_order = 128;
+
+    namespace fs = std::filesystem;
+
+    // Helper: 从指定缓存文件读取聚团数据并输出 JSON
+    auto emit_from_cache = [&](const fs::path& cache_path, bool from_precomputed) -> bool {
+        std::ifstream in(cache_path, std::ios::binary);
+        if (!in.is_open()) return false;
+        std::array<char, 8> magic{};
+        in.read(magic.data(), 8);
+        if (!in || std::string_view(magic.data(), 8) != std::string_view("DBLPF6C\0", 8)) return false;
+        std::uint32_t version = 0;
+        in.read(reinterpret_cast<char*>(&version), sizeof(version));
+        if (!in || version != 1u) return false;
+        std::uint64_t docs = 0, authors = 0, edges = 0, papers = 0, skipped = 0, max_authors = 0;
+        std::uint32_t cached_max_order = 0, cached_degeneracy = 0, cached_oriented = 0;
+        if (!read_varuint64(in, docs) || !read_varuint64(in, authors) ||
+            !read_varuint64(in, edges) || !read_varuint64(in, papers) ||
+            !read_varuint64(in, skipped) || !read_varuint64(in, max_authors) ||
+            !read_varuint32(in, cached_max_order) ||
+            !read_varuint32(in, cached_degeneracy) ||
+            !read_varuint32(in, cached_oriented)) return false;
+        std::map<std::uint32_t, unsigned long long> counts;
+        for (std::uint32_t order = 1; order <= cached_max_order; ++order) {
+            std::uint64_t value = 0;
+            std::uint32_t saturated_flag = 0;
+            if (!read_varuint64(in, value) || !read_varuint32(in, saturated_flag)) break;
+            if (order >= 2 && order <= max_order && value > 0) counts[order] = value;
+        }
+        os << "F6\t{\"max_order\":" << std::min(max_order, cached_max_order)
+           << ",\"author_count\":" << authors
+           << ",\"edge_count\":" << edges
+           << ",\"paper_count\":" << papers
+           << ",\"counts\":{";
+        bool first = true;
+        for (const auto& kv : counts) {
+            if (!first) os << ',';
+            os << '"' << kv.first << "\":" << kv.second;
+            first = false;
+        }
+        os << "},\"cached\":" << (from_precomputed ? "true" : "false") << "}\nEND\n";
+        return true;
+    };
+
+    // 1. 精确匹配缓存
+    const fs::path exact_path = locate_f6_global_clique_counts_file_path(max_order);
+    std::error_code ec;
+    if (fs::exists(exact_path, ec) && !ec) {
+        if (emit_from_cache(exact_path, true)) return;
+    }
+
+    // 2. 查找更高阶缓存（如请求 k=3，已有 k=5 缓存）
+    for (std::uint32_t k = max_order + 1; k <= 128; ++k) {
+        const fs::path higher_path = locate_f6_global_clique_counts_file_path(k);
+        std::error_code ec2;
+        if (fs::exists(higher_path, ec2) && !ec2) {
+            if (emit_from_cache(higher_path, true)) return;
+        }
+    }
+
+    // 3. 在线计算
+    std::cout << "[Serve-F6] 缓存未命中，开始在线计算 k=" << max_order << " ...\n" << std::flush;
+    std::ostringstream null_stream;
+    std::streambuf* orig_cout = std::cout.rdbuf();
+    std::cout.rdbuf(null_stream.rdbuf());
+    try {
+        execute_f6_global_ranking(max_order);
+    } catch (...) {
+        std::cout.rdbuf(orig_cout);
+        throw;
+    }
+    std::cout.rdbuf(orig_cout);
+    std::cout << "[Serve-F6] 计算完成，k=" << max_order << "\n" << std::flush;
+
+    // 4. 加载新生成的缓存
+    if (emit_from_cache(exact_path, false)) return;
+    os << "ERROR\tF6 计算完成但缓存加载失败\nEND\n";
+}
+
+void ExtremeEngine::execute_f6_global_ranking(std::uint32_t cli_max_order) const {
+    const auto t0 = std::chrono::steady_clock::now();
+
+    constexpr std::size_t kMaxAuthorsPerPaper = 64;
+    constexpr unsigned long long kCountSaturation = std::numeric_limits<unsigned long long>::max();
+    constexpr std::uint32_t kParticipationMaxOrder = 8;
+
+    const bool cli_mode = (cli_max_order != 0u);
+    bool author_participation_mode = false;
+    bool local_maximal_mode = false;
+    std::string target_author_raw;
+
+    if (!cli_mode) {
+        std::cout << "========== F6 聚团分析 ==========\n";
+        std::cout << " [1] 全图各阶聚团统计\n";
+        std::cout << " [2] 查询作者参与的各阶聚团数量\n";
+        std::cout << " [3] 查询作者局部极大聚团分析\n";
+        std::cout << "请选择子功能 [1-3，默认1]: " << std::flush;
+        std::string f6_choice_line;
+        std::getline(std::cin >> std::ws, f6_choice_line);
+        author_participation_mode = trim_sv(f6_choice_line) == "2";
+        local_maximal_mode = trim_sv(f6_choice_line) == "3";
+        if (author_participation_mode || local_maximal_mode) {
+            std::cout << "请输入作者姓名: " << std::flush;
+            std::getline(std::cin >> std::ws, target_author_raw);
+            if (trim_sv(target_author_raw).empty()) {
+                std::cout << "输入为空，已取消作者聚团分析。\n";
+                return;
+            }
+        }
+    }
+    std::cout << (local_maximal_mode ? "========== F6 作者局部极大聚团分析 ==========\n"
+                  : author_participation_mode ? "========== F6 作者聚团参与统计 ==========\n"
+                                              : "========== F6 全图聚团统计 ==========\n");
+    if (local_maximal_mode) {
+        execute_f6_author_local_maximal_cliques(target_author_raw);
+        return;
+    }
+    std::uint32_t requested_max_order = cli_mode ? cli_max_order : kParticipationMaxOrder;
+    if (!cli_mode && !author_participation_mode) {
+        std::cout << "请输入最大统计阶数 [默认8，建议8-12]: " << std::flush;
+        std::string max_order_line;
+        std::getline(std::cin >> std::ws, max_order_line);
+        const std::string_view max_order_sv = trim_sv(max_order_line);
+        if (!max_order_sv.empty()) {
+            try {
+                const unsigned long parsed = std::stoul(std::string(max_order_sv));
+                requested_max_order =
+                    static_cast<std::uint32_t>(std::clamp<unsigned long>(parsed, 2UL, 128UL));
+            } catch (const std::exception&) {
+                std::cout << "[提示] 最大阶数输入无效，使用默认值 8。\n";
+                requested_max_order = kParticipationMaxOrder;
+            }
+        }
+    }
+    std::cout << "[模式] Degeneracy Ordering + DAG 重定向 + 递归有序交集，统计到 "
+              << requested_max_order << " 阶。\n";
+
+    std::vector<std::uint64_t> encoded_edges;
+    std::vector<std::string> author_names;
+    std::uint32_t author_count = 0;
+    std::uint64_t papers_with_authors = 0;
+    std::uint64_t skipped_large_papers = 0;
+    std::size_t max_authors_seen = 0;
+    std::vector<std::array<unsigned long long, kParticipationMaxOrder + 1>> cached_author_participation;
+    bool author_participation_cache_loaded = false;
+
+    const auto try_load_f6_graph = [&]() {
+        namespace fs = std::filesystem;
+        const fs::path seg_path = locate_f6_collab_graph_file_path();
+        std::error_code ec;
+        if (!fs::exists(seg_path, ec) || ec) {
+            return false;
+        }
+        std::ifstream in(seg_path, std::ios::binary);
+        if (!in.is_open()) {
+            return false;
+        }
+        std::array<char, 8> magic{};
+        in.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+        if (!in || std::string_view(magic.data(), magic.size()) != std::string_view("DBLPF6G\0", 8)) {
+            return false;
+        }
+        std::uint32_t version = 0;
+        in.read(reinterpret_cast<char*>(&version), sizeof(version));
+        if (!in || version != 2u) {
+            return false;
+        }
+        std::uint64_t docs = 0;
+        std::uint64_t author_total = 0;
+        std::uint64_t edge_total = 0;
+        std::uint64_t max_authors_total = 0;
+        if (!read_varuint64(in, docs) ||
+            !read_varuint64(in, author_total) ||
+            !read_varuint64(in, papers_with_authors) ||
+            !read_varuint64(in, skipped_large_papers) ||
+            !read_varuint64(in, max_authors_total) ||
+            !read_varuint64(in, edge_total)) {
+            return false;
+        }
+        if (docs != forward_index_.size() || author_total > std::numeric_limits<std::uint32_t>::max()) {
+            return false;
+        }
+        author_count = static_cast<std::uint32_t>(author_total);
+        max_authors_seen = static_cast<std::size_t>(max_authors_total);
+        author_names.clear();
+        author_names.reserve(author_count);
+        StringArena cache_read_arena(4u * 1024u * 1024u);
+        for (std::uint32_t i = 0; i < author_count; ++i) {
+            std::string_view name_sv;
+            if (!read_segment_string(in, cache_read_arena, name_sv)) {
+                return false;
+            }
+            author_names.emplace_back(name_sv);
+        }
+        encoded_edges.clear();
+        encoded_edges.reserve(static_cast<std::size_t>(edge_total));
+        for (std::uint64_t i = 0; i < edge_total; ++i) {
+            std::uint64_t e = 0;
+            if (!read_varuint64(in, e)) {
+                return false;
+            }
+            encoded_edges.push_back(e);
+        }
+        if (!in && !in.eof()) {
+            return false;
+        }
+        std::cout << "[F6缓存] 已加载合作图缓存: " << seg_path << '\n';
+        return true;
+    };
+
+    const auto save_f6_graph = [&]() {
+        namespace fs = std::filesystem;
+        const fs::path seg_path = locate_f6_collab_graph_file_path();
+        std::error_code ec;
+        fs::create_directories(seg_path.parent_path(), ec);
+        if (ec) {
+            std::cerr << "[F6缓存] 无法创建缓存目录: " << seg_path.parent_path() << " | " << ec.message() << '\n';
+            return;
+        }
+        const fs::path tmp_path = seg_path.string() + ".tmp";
+        std::ofstream out_file(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!out_file.is_open()) {
+            std::cerr << "[F6缓存] 无法写入缓存: " << tmp_path << '\n';
+            return;
+        }
+        static constexpr std::array<char, 8> kMagic = {'D', 'B', 'L', 'P', 'F', '6', 'G', '\0'};
+        const std::uint32_t version = 2u;
+        out_file.write(kMagic.data(), static_cast<std::streamsize>(kMagic.size()));
+        out_file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+        write_varuint64(out_file, static_cast<std::uint64_t>(forward_index_.size()));
+        write_varuint64(out_file, author_count);
+        write_varuint64(out_file, papers_with_authors);
+        write_varuint64(out_file, skipped_large_papers);
+        write_varuint64(out_file, static_cast<std::uint64_t>(max_authors_seen));
+        write_varuint64(out_file, static_cast<std::uint64_t>(encoded_edges.size()));
+        for (const std::string& name : author_names) {
+            write_segment_string(out_file, name);
+        }
+        for (const std::uint64_t e : encoded_edges) {
+            write_varuint64(out_file, e);
+        }
+        out_file.flush();
+        out_file.close();
+        if (!out_file) {
+            std::cerr << "[F6缓存] 写入缓存失败: " << tmp_path << '\n';
+            return;
+        }
+        fs::rename(tmp_path, seg_path, ec);
+        if (ec) {
+            fs::remove(seg_path, ec);
+            ec.clear();
+            fs::rename(tmp_path, seg_path, ec);
+        }
+        if (ec) {
+            fs::remove(tmp_path, ec);
+            std::cerr << "[F6缓存] 无法替换缓存: " << seg_path << '\n';
+            return;
+        }
+        std::cout << "[F6缓存] 合作图缓存已保存: " << seg_path << '\n';
+    };
+
+    if (!try_load_f6_graph()) {
+        std::unordered_map<std::string_view, std::uint32_t> author_id;
+        author_id.reserve(author_global_.size() * 2 + 1);
+        std::uint32_t next_id = 0;
+        author_global_.for_each([&](const std::string_view author, const std::vector<Posting>&) {
+            if (!author.empty()) {
+                author_id.emplace(author, next_id++);
+                author_names.emplace_back(author);
+            }
+        });
+        author_count = next_id;
+        if (author_count == 0) {
+            std::cout << "作者图为空。\n";
+            return;
+        }
+
+        encoded_edges.reserve(std::min<std::size_t>(forward_index_.size() * 2, 32u * 1024u * 1024u));
+        for (const Document& doc : forward_index_) {
+            if (doc.authors.empty()) {
+                continue;
+            }
+            std::vector<std::uint32_t> ids;
+            ids.reserve(8);
+            for_each_author_segment(doc.authors, [&](const std::string_view seg) {
+                const std::string_view trimmed = trim_sv(seg);
+                if (trimmed.empty()) {
+                    return;
+                }
+                const std::vector<std::string_view> toks = Analyzer::normalize_and_tokenize(trimmed, query_arena_);
+                if (toks.empty()) {
+                    return;
+                }
+                const char* const beg = toks.front().data();
+                const char* const ed = toks.back().data() + toks.back().size();
+                const std::string_view key{beg, static_cast<std::size_t>(ed - beg)};
+                const auto it = author_id.find(key);
+                if (it != author_id.end()) {
+                    ids.push_back(it->second);
+                }
+            });
+            if (ids.empty()) {
+                continue;
+            }
+            ++papers_with_authors;
+            std::sort(ids.begin(), ids.end());
+            ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+            max_authors_seen = std::max(max_authors_seen, ids.size());
+            if (ids.size() > kMaxAuthorsPerPaper) {
+                ++skipped_large_papers;
+                ids.resize(kMaxAuthorsPerPaper);
+            }
+            for (std::size_t i = 0; i < ids.size(); ++i) {
+                for (std::size_t j = i + 1; j < ids.size(); ++j) {
+                    const std::uint32_t u = ids[i];
+                    const std::uint32_t v = ids[j];
+                    const std::uint32_t a = std::min(u, v);
+                    const std::uint32_t b = std::max(u, v);
+                    encoded_edges.push_back((static_cast<std::uint64_t>(a) << 32u) | b);
+                }
+            }
+            query_arena_.reset();
+        }
+
+        std::sort(encoded_edges.begin(), encoded_edges.end());
+        encoded_edges.erase(std::unique(encoded_edges.begin(), encoded_edges.end()), encoded_edges.end());
+        save_f6_graph();
+    }
+
+    if (author_count == 0) {
+        std::cout << "作者图为空。\n";
+        return;
+    }
+
+    auto try_load_author_participation_cache = [&]() {
+        namespace fs = std::filesystem;
+        const fs::path seg_path = locate_f6_author_participation_file_path();
+        std::error_code ec;
+        if (!fs::exists(seg_path, ec) || ec) {
+            return false;
+        }
+        std::ifstream in(seg_path, std::ios::binary);
+        if (!in.is_open()) {
+            return false;
+        }
+        std::array<char, 8> magic{};
+        in.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+        if (!in || std::string_view(magic.data(), magic.size()) != std::string_view("DBLPF6P\0", 8)) {
+            return false;
+        }
+        std::uint32_t version = 0;
+        in.read(reinterpret_cast<char*>(&version), sizeof(version));
+        if (!in || version != 1u) {
+            return false;
+        }
+        std::uint64_t docs = 0;
+        std::uint64_t authors = 0;
+        std::uint32_t max_order = 0;
+        if (!read_varuint64(in, docs) || !read_varuint64(in, authors) || !read_varuint32(in, max_order)) {
+            return false;
+        }
+        if (docs != forward_index_.size() || authors != author_count || max_order != kParticipationMaxOrder) {
+            return false;
+        }
+        cached_author_participation.assign(author_count, {});
+        for (std::uint32_t aid = 0; aid < author_count; ++aid) {
+            for (std::uint32_t order = 1; order <= kParticipationMaxOrder; ++order) {
+                std::uint64_t value = 0;
+                if (!read_varuint64(in, value)) {
+                    cached_author_participation.clear();
+                    return false;
+                }
+                cached_author_participation[aid][order] = value;
+            }
+        }
+        std::cout << "[F6缓存] 已加载作者聚团参与统计缓存: " << seg_path << '\n';
+        return true;
+    };
+
+    auto save_author_participation_cache =
+        [&](const std::vector<std::array<unsigned long long, kParticipationMaxOrder + 1>>& counts) {
+            namespace fs = std::filesystem;
+            const fs::path seg_path = locate_f6_author_participation_file_path();
+            std::error_code ec;
+            fs::create_directories(seg_path.parent_path(), ec);
+            if (ec) {
+                std::cerr << "[F6缓存] 无法创建作者参与统计缓存目录: " << seg_path.parent_path()
+                          << " | " << ec.message() << '\n';
+                return;
+            }
+            const fs::path tmp_path = seg_path.string() + ".tmp";
+            std::ofstream out_file(tmp_path, std::ios::binary | std::ios::trunc);
+            if (!out_file.is_open()) {
+                std::cerr << "[F6缓存] 无法写入作者参与统计缓存: " << tmp_path << '\n';
+                return;
+            }
+            static constexpr std::array<char, 8> kMagic = {'D', 'B', 'L', 'P', 'F', '6', 'P', '\0'};
+            const std::uint32_t version = 1u;
+            out_file.write(kMagic.data(), static_cast<std::streamsize>(kMagic.size()));
+            out_file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+            write_varuint64(out_file, static_cast<std::uint64_t>(forward_index_.size()));
+            write_varuint64(out_file, author_count);
+            write_varuint32(out_file, kParticipationMaxOrder);
+            for (const auto& per_author : counts) {
+                for (std::uint32_t order = 1; order <= kParticipationMaxOrder; ++order) {
+                    write_varuint64(out_file, per_author[order]);
+                }
+            }
+            out_file.flush();
+            out_file.close();
+            if (!out_file) {
+                std::cerr << "[F6缓存] 写入作者参与统计缓存失败: " << tmp_path << '\n';
+                return;
+            }
+            fs::rename(tmp_path, seg_path, ec);
+            if (ec) {
+                fs::remove(seg_path, ec);
+                ec.clear();
+                fs::rename(tmp_path, seg_path, ec);
+            }
+            if (ec) {
+                fs::remove(tmp_path, ec);
+                std::cerr << "[F6缓存] 无法替换作者参与统计缓存: " << seg_path << '\n';
+                return;
+            }
+            std::cout << "[F6缓存] 作者聚团参与统计缓存已保存: " << seg_path << '\n';
+        };
+
+    author_participation_cache_loaded = try_load_author_participation_cache();
+    std::vector<std::uint32_t> core_degree(author_count, 0u);
+    for (const std::uint64_t e : encoded_edges) {
+        const std::uint32_t u = static_cast<std::uint32_t>(e >> 32u);
+        const std::uint32_t v = static_cast<std::uint32_t>(e);
+        ++core_degree[u];
+        ++core_degree[v];
+    }
+    std::vector<std::uint64_t> adj_offsets(static_cast<std::size_t>(author_count) + 1, 0u);
+    for (std::uint32_t v = 0; v < author_count; ++v) {
+        adj_offsets[static_cast<std::size_t>(v) + 1] =
+            adj_offsets[static_cast<std::size_t>(v)] + core_degree[v];
+    }
+    std::vector<std::uint32_t> adj_neighbors(static_cast<std::size_t>(adj_offsets.back()));
+    std::vector<std::uint64_t> cursor = adj_offsets;
+    for (const std::uint64_t e : encoded_edges) {
+        const std::uint32_t u = static_cast<std::uint32_t>(e >> 32u);
+        const std::uint32_t v = static_cast<std::uint32_t>(e);
+        adj_neighbors[static_cast<std::size_t>(cursor[u]++)] = v;
+        adj_neighbors[static_cast<std::size_t>(cursor[v]++)] = u;
+    }
+
+    using DegNode = std::pair<std::uint32_t, std::uint32_t>;
+    std::priority_queue<DegNode, std::vector<DegNode>, std::greater<DegNode>> peel_heap;
+    for (std::uint32_t v = 0; v < author_count; ++v) {
+        peel_heap.push({core_degree[v], v});
+    }
+    std::vector<std::uint8_t> removed(author_count, 0u);
+    std::vector<std::uint32_t> rank(author_count, 0u);
+    std::uint32_t rank_next = 0;
+    std::uint32_t degeneracy = 0;
+    while (!peel_heap.empty()) {
+        const auto [deg, v] = peel_heap.top();
+        peel_heap.pop();
+        if (removed[v] != 0u || deg != core_degree[v]) {
+            continue;
+        }
+        removed[v] = 1u;
+        rank[v] = rank_next++;
+        degeneracy = std::max(degeneracy, deg);
+        const std::uint64_t beg = adj_offsets[v];
+        const std::uint64_t end = adj_offsets[static_cast<std::size_t>(v) + 1];
+        for (std::uint64_t i = beg; i < end; ++i) {
+            const std::uint32_t nb = adj_neighbors[static_cast<std::size_t>(i)];
+            if (removed[nb] == 0u && core_degree[nb] > 0u) {
+                --core_degree[nb];
+                peel_heap.push({core_degree[nb], nb});
+            }
+        }
+    }
+
+    std::vector<std::vector<std::uint32_t>> out(author_count);
+    for (const std::uint64_t e : encoded_edges) {
+        const std::uint32_t u = static_cast<std::uint32_t>(e >> 32u);
+        const std::uint32_t v = static_cast<std::uint32_t>(e);
+        if (rank[u] < rank[v]) {
+            out[u].push_back(v);
+        } else {
+            out[v].push_back(u);
+        }
+    }
+    adj_offsets.clear();
+    adj_offsets.shrink_to_fit();
+    adj_neighbors.clear();
+    adj_neighbors.shrink_to_fit();
+    for (std::vector<std::uint32_t>& nbrs : out) {
+        std::sort(nbrs.begin(), nbrs.end(), [&](const std::uint32_t a, const std::uint32_t b) {
+            return rank[a] < rank[b];
+        });
+    }
+
+    auto intersect_by_rank = [&](const std::vector<std::uint32_t>& a, const std::vector<std::uint32_t>& b) {
+        std::vector<std::uint32_t> outv;
+        outv.reserve(std::min(a.size(), b.size()));
+        auto ia = a.begin();
+        auto ib = b.begin();
+        while (ia != a.end() && ib != b.end()) {
+            const std::uint32_t va = *ia;
+            const std::uint32_t vb = *ib;
+            if (va == vb) {
+                outv.push_back(va);
+                ++ia;
+                ++ib;
+            } else if (rank[va] < rank[vb]) {
+                ++ia;
+            } else {
+                ++ib;
+            }
+        }
+        return outv;
+    };
+
+    auto add_count_saturated = [&](std::vector<unsigned long long>& counts, std::vector<std::uint8_t>& sat,
+                                   const std::uint32_t order, const unsigned long long delta) {
+        if (order >= counts.size()) {
+            counts.resize(static_cast<std::size_t>(order) + 1, 0ULL);
+            sat.resize(static_cast<std::size_t>(order) + 1, 0u);
+        }
+        if (kCountSaturation - counts[order] < delta) {
+            counts[order] = kCountSaturation;
+            sat[order] = 1u;
+        } else {
+            counts[order] += delta;
+        }
+    };
+
+    std::uint32_t oriented_max_out_degree = 0;
+    for (const std::vector<std::uint32_t>& nbrs : out) {
+        oriented_max_out_degree =
+            std::max<std::uint32_t>(oriented_max_out_degree, static_cast<std::uint32_t>(nbrs.size()));
+    }
+
+    auto print_global_clique_counts = [&](const std::vector<unsigned long long>& clique_counts,
+                                          const std::vector<std::uint8_t>& saturated_flags) {
+        std::cout << "[图信息] 作者数=" << author_count
+                  << " 含作者论文数=" << papers_with_authors
+                  << " 合作边数=" << encoded_edges.size() << '\n';
+        std::cout << "[图信息] 单篇最大作者数=" << max_authors_seen
+                  << " 被截断的大作者论文数=" << skipped_large_papers
+                  << " degeneracy=" << degeneracy
+                  << " 定向最大出度=" << oriented_max_out_degree << '\n';
+        std::cout << "[统计结果] 统计所有完全子图，不只是极大聚团\n";
+        std::uint32_t max_order = 0;
+        const std::uint32_t upper =
+            std::min<std::uint32_t>(requested_max_order, static_cast<std::uint32_t>(clique_counts.size() - 1));
+        for (std::uint32_t k = 1; k <= upper; ++k) {
+            if (clique_counts[k] != 0ULL) {
+                max_order = k;
+            }
+        }
+        for (std::uint32_t k = 1; k <= max_order; ++k) {
+            std::cout << k << " 阶聚团: " << clique_counts[k];
+            if (k < saturated_flags.size() && saturated_flags[k] != 0u) {
+                std::cout << "（已饱和）";
+            }
+            std::cout << '\n';
+        }
+        std::cout << "[最大已统计阶数] " << max_order << '\n';
+        std::cout << "[统计阶数上限] " << requested_max_order << '\n';
+    };
+
+    auto try_load_global_clique_counts_cache = [&](std::vector<unsigned long long>& counts,
+                                                  std::vector<std::uint8_t>& sat) {
+        namespace fs = std::filesystem;
+        const fs::path seg_path = locate_f6_global_clique_counts_file_path(requested_max_order);
+        std::error_code ec;
+        if (!fs::exists(seg_path, ec) || ec) {
+            return false;
+        }
+        std::ifstream in(seg_path, std::ios::binary);
+        if (!in.is_open()) {
+            return false;
+        }
+        std::array<char, 8> magic{};
+        in.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+        if (!in || std::string_view(magic.data(), magic.size()) != std::string_view("DBLPF6C\0", 8)) {
+            return false;
+        }
+        std::uint32_t version = 0;
+        in.read(reinterpret_cast<char*>(&version), sizeof(version));
+        if (!in || version != 1u) {
+            return false;
+        }
+        std::uint64_t docs = 0;
+        std::uint64_t authors = 0;
+        std::uint64_t edges = 0;
+        std::uint64_t papers = 0;
+        std::uint64_t skipped = 0;
+        std::uint64_t max_authors = 0;
+        std::uint32_t cached_max_order = 0;
+        std::uint32_t cached_degeneracy = 0;
+        std::uint32_t cached_oriented_max_out = 0;
+        if (!read_varuint64(in, docs) ||
+            !read_varuint64(in, authors) ||
+            !read_varuint64(in, edges) ||
+            !read_varuint64(in, papers) ||
+            !read_varuint64(in, skipped) ||
+            !read_varuint64(in, max_authors) ||
+            !read_varuint32(in, cached_max_order) ||
+            !read_varuint32(in, cached_degeneracy) ||
+            !read_varuint32(in, cached_oriented_max_out)) {
+            return false;
+        }
+        if (docs != forward_index_.size() ||
+            authors != author_count ||
+            edges != encoded_edges.size() ||
+            papers != papers_with_authors ||
+            skipped != skipped_large_papers ||
+            max_authors != max_authors_seen ||
+            cached_max_order != requested_max_order) {
+            return false;
+        }
+        degeneracy = cached_degeneracy;
+        oriented_max_out_degree = cached_oriented_max_out;
+        counts.assign(static_cast<std::size_t>(requested_max_order) + 1u, 0ULL);
+        sat.assign(static_cast<std::size_t>(requested_max_order) + 1u, 0u);
+        for (std::uint32_t order = 1; order <= requested_max_order; ++order) {
+            std::uint64_t value = 0;
+            std::uint32_t saturated_flag = 0;
+            if (!read_varuint64(in, value) || !read_varuint32(in, saturated_flag)) {
+                counts.clear();
+                sat.clear();
+                return false;
+            }
+            counts[order] = value;
+            sat[order] = saturated_flag == 0u ? 0u : 1u;
+        }
+        std::cout << "[F6缓存] 已加载全图聚团统计缓存: " << seg_path << '\n';
+        return true;
+    };
+
+    auto save_global_clique_counts_cache = [&](const std::vector<unsigned long long>& counts,
+                                               const std::vector<std::uint8_t>& sat) {
+        namespace fs = std::filesystem;
+        const fs::path seg_path = locate_f6_global_clique_counts_file_path(requested_max_order);
+        std::error_code ec;
+        fs::create_directories(seg_path.parent_path(), ec);
+        if (ec) {
+            std::cerr << "[F6缓存] 无法创建全图聚团统计缓存目录: " << seg_path.parent_path()
+                      << " | " << ec.message() << '\n';
+            return;
+        }
+        const fs::path tmp_path = seg_path.string() + ".tmp";
+        std::ofstream out_file(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!out_file.is_open()) {
+            std::cerr << "[F6缓存] 无法写入全图聚团统计缓存: " << tmp_path << '\n';
+            return;
+        }
+        static constexpr std::array<char, 8> kMagic = {'D', 'B', 'L', 'P', 'F', '6', 'C', '\0'};
+        const std::uint32_t version = 1u;
+        out_file.write(kMagic.data(), static_cast<std::streamsize>(kMagic.size()));
+        out_file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+        write_varuint64(out_file, static_cast<std::uint64_t>(forward_index_.size()));
+        write_varuint64(out_file, author_count);
+        write_varuint64(out_file, static_cast<std::uint64_t>(encoded_edges.size()));
+        write_varuint64(out_file, papers_with_authors);
+        write_varuint64(out_file, skipped_large_papers);
+        write_varuint64(out_file, static_cast<std::uint64_t>(max_authors_seen));
+        write_varuint32(out_file, requested_max_order);
+        write_varuint32(out_file, degeneracy);
+        write_varuint32(out_file, oriented_max_out_degree);
+        for (std::uint32_t order = 1; order <= requested_max_order; ++order) {
+            const unsigned long long value = order < counts.size() ? counts[order] : 0ULL;
+            const std::uint32_t saturated_flag = (order < sat.size() && sat[order] != 0u) ? 1u : 0u;
+            write_varuint64(out_file, value);
+            write_varuint32(out_file, saturated_flag);
+        }
+        out_file.flush();
+        out_file.close();
+        if (!out_file) {
+            std::cerr << "[F6缓存] 写入全图聚团统计缓存失败: " << tmp_path << '\n';
+            return;
+        }
+        fs::rename(tmp_path, seg_path, ec);
+        if (ec) {
+            fs::remove(seg_path, ec);
+            ec.clear();
+            fs::rename(tmp_path, seg_path, ec);
+        }
+        if (ec) {
+            fs::remove(tmp_path, ec);
+            std::cerr << "[F6缓存] 无法替换全图聚团统计缓存: " << seg_path << '\n';
+            return;
+        }
+        std::cout << "[F6缓存] 全图聚团统计缓存已保存: " << seg_path << '\n';
+    };
+
+    if (!author_participation_mode) {
+        std::vector<unsigned long long> cached_counts;
+        std::vector<std::uint8_t> cached_saturated;
+        if (try_load_global_clique_counts_cache(cached_counts, cached_saturated)) {
+            print_global_clique_counts(cached_counts, cached_saturated);
+            const auto t1 = std::chrono::steady_clock::now();
+            const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+            std::cout << "[计时] F6 执行总耗时: " << total_ms << " ms\n";
+            return;
+        }
+    }
+
+    if (author_participation_mode) {
+        const std::string_view target_key = build_normalized_lookup_key(target_author_raw);
+        if (target_key.empty()) {
+            std::cout << "查询无效（无法规范化目标作者）。\n";
+            return;
+        }
+        const auto name_it = std::find(author_names.begin(), author_names.end(), std::string(target_key));
+        if (name_it == author_names.end()) {
+            std::cout << "未找到该作者。\n";
+            return;
+        }
+        const std::uint32_t target_id = static_cast<std::uint32_t>(std::distance(author_names.begin(), name_it));
+        if (author_participation_cache_loaded && target_id < cached_author_participation.size()) {
+            const auto& cached_counts = cached_author_participation[target_id];
+            std::uint32_t max_cached_order = 0;
+            for (std::uint32_t k = 1; k <= kParticipationMaxOrder; ++k) {
+                if (cached_counts[k] != 0ULL) {
+                    max_cached_order = k;
+                }
+            }
+            std::cout << "[作者] " << *name_it << '\n';
+            std::cout << "[说明] 使用预计算缓存，查询阶段只做查表，目标为亚秒级响应。\n";
+            for (std::uint32_t k = 1; k <= max_cached_order; ++k) {
+                std::cout << k << " 阶聚团参与数: " << cached_counts[k] << '\n';
+            }
+            if (max_cached_order == kParticipationMaxOrder) {
+                std::cout << "[提示] 预计算缓存当前统计到 " << kParticipationMaxOrder
+                          << " 阶；更高阶可运行全图长任务扩展缓存。\n";
+            }
+            std::cout << "[最大已缓存参与阶数] " << max_cached_order << '\n';
+            const auto t1 = std::chrono::steady_clock::now();
+            const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+            std::cout << "[计时] F6 作者聚团参与统计耗时: " << total_ms << " ms\n";
+            return;
+        }
+
+        std::cout << "[提示] 未找到作者聚团参与统计缓存，将使用现场递归兜底；建议先运行 F6 全图统计生成缓存。\n";
+        std::vector<std::uint32_t> target_neighbors;
+        target_neighbors.reserve(core_degree[target_id]);
+        for (const std::uint64_t e : encoded_edges) {
+            const std::uint32_t u = static_cast<std::uint32_t>(e >> 32u);
+            const std::uint32_t v = static_cast<std::uint32_t>(e);
+            if (u == target_id) {
+                target_neighbors.push_back(v);
+            } else if (v == target_id) {
+                target_neighbors.push_back(u);
+            }
+        }
+        std::sort(target_neighbors.begin(), target_neighbors.end(), [&](const std::uint32_t a, const std::uint32_t b) {
+            return rank[a] < rank[b];
+        });
+
+        std::vector<unsigned long long> participation_counts(3, 0ULL);
+        std::vector<std::uint8_t> participation_saturated(3, 0u);
+        participation_counts[1] = 1ULL;
+        participation_counts[2] = static_cast<unsigned long long>(target_neighbors.size());
+
+        std::function<void(std::uint32_t, std::vector<std::uint32_t>&)> count_target_from;
+        count_target_from = [&](const std::uint32_t depth, std::vector<std::uint32_t>& candidates) {
+            if (candidates.empty()) {
+                return;
+            }
+            for (const std::uint32_t v : candidates) {
+                add_count_saturated(participation_counts, participation_saturated, depth + 1, 1ULL);
+                std::vector<std::uint32_t> next = intersect_by_rank(candidates, out[v]);
+                count_target_from(depth + 1, next);
+            }
+        };
+        std::vector<std::uint32_t> seed = target_neighbors;
+        count_target_from(1, seed);
+
+        std::uint32_t max_participation_order = 0;
+        for (std::uint32_t k = 1; k < participation_counts.size(); ++k) {
+            if (participation_counts[k] != 0ULL) {
+                max_participation_order = k;
+            }
+        }
+
+        std::cout << "[作者] " << *name_it << '\n';
+        std::cout << "[说明] 统计该作者参与的各阶完全子图数量。\n";
+        for (std::uint32_t k = 1; k <= max_participation_order; ++k) {
+            std::cout << k << " 阶聚团参与数: " << participation_counts[k];
+            if (k < participation_saturated.size() && participation_saturated[k] != 0u) {
+                std::cout << "（已饱和）";
+            }
+            std::cout << '\n';
+        }
+        std::cout << "[最大参与阶数] " << max_participation_order << '\n';
+        const auto t1 = std::chrono::steady_clock::now();
+        const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        std::cout << "[计时] F6 作者聚团参与统计耗时: " << total_ms << " ms\n";
+        return;
+    }
+
+    const unsigned hw_threads = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned worker_count = std::max(1u, std::min<unsigned>(16u, hw_threads));
+    constexpr std::uint32_t kVertexBatch = 256;
+    std::atomic<std::uint32_t> next_vertex{0u};
+
+    struct ThreadCliqueCounts {
+        std::vector<unsigned long long> counts{0ULL, 0ULL};
+        std::vector<std::uint8_t> saturated{0u, 0u};
+    };
+    std::vector<ThreadCliqueCounts> thread_counts(worker_count);
+    std::vector<std::mutex> thread_count_mutexes(worker_count);
+    const bool build_author_participation_cache =
+        !author_participation_cache_loaded && requested_max_order >= kParticipationMaxOrder;
+    const std::size_t participation_stride = static_cast<std::size_t>(kParticipationMaxOrder) + 1u;
+    std::vector<std::atomic<unsigned long long>> author_participation_atomic(
+        build_author_participation_cache ? static_cast<std::size_t>(author_count) * participation_stride : 0u);
+
+    auto add_local_count = [&](ThreadCliqueCounts& local, const std::uint32_t order, const unsigned long long delta) {
+        if (order >= local.counts.size()) {
+            local.counts.resize(static_cast<std::size_t>(order) + 1, 0ULL);
+            local.saturated.resize(static_cast<std::size_t>(order) + 1, 0u);
+        }
+        if (kCountSaturation - local.counts[order] < delta) {
+            local.counts[order] = kCountSaturation;
+            local.saturated[order] = 1u;
+        } else {
+            local.counts[order] += delta;
+        }
+    };
+    auto add_author_participation = [&](const std::uint32_t author, const std::uint32_t order,
+                                        const unsigned long long delta) {
+        if (!build_author_participation_cache || order > kParticipationMaxOrder) {
+            return;
+        }
+        std::atomic<unsigned long long>& cell =
+            author_participation_atomic[static_cast<std::size_t>(author) * participation_stride + order];
+        unsigned long long cur = cell.load(std::memory_order_relaxed);
+        while (cur != kCountSaturation) {
+            const unsigned long long next = (kCountSaturation - cur < delta) ? kCountSaturation : (cur + delta);
+            if (cell.compare_exchange_weak(cur, next, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                break;
+            }
+        }
+    };
+
+    auto worker = [&](const unsigned tid) {
+        ThreadCliqueCounts local;
+        auto intersect_sorted_local = [&](const std::vector<std::uint32_t>& a, const std::vector<std::uint32_t>& b) {
+            std::vector<std::uint32_t> outv;
+            outv.reserve(std::min(a.size(), b.size()));
+            auto ia = a.begin();
+            auto ib = b.begin();
+            while (ia != a.end() && ib != b.end()) {
+                const std::uint32_t va = *ia;
+                const std::uint32_t vb = *ib;
+                if (va == vb) {
+                    outv.push_back(va);
+                    ++ia;
+                    ++ib;
+                } else if (rank[va] < rank[vb]) {
+                    ++ia;
+                } else {
+                    ++ib;
+                }
+            }
+            return outv;
+        };
+
+        std::vector<std::uint32_t> clique_vertices;
+        clique_vertices.reserve(64);
+        std::function<void(std::uint32_t, std::vector<std::uint32_t>&)> count_from;
+        count_from = [&](const std::uint32_t depth, std::vector<std::uint32_t>& candidates) {
+            if (candidates.empty() || depth >= requested_max_order) {
+                return;
+            }
+            for (const std::uint32_t v : candidates) {
+                add_local_count(local, depth + 1, 1ULL);
+                if (depth + 1 <= kParticipationMaxOrder) {
+                    for (const std::uint32_t member : clique_vertices) {
+                        add_author_participation(member, depth + 1, 1ULL);
+                    }
+                    add_author_participation(v, depth + 1, 1ULL);
+                }
+                clique_vertices.push_back(v);
+                std::vector<std::uint32_t> next = intersect_sorted_local(candidates, out[v]);
+                count_from(depth + 1, next);
+                clique_vertices.pop_back();
+            }
+        };
+
+        while (true) {
+            const std::uint32_t begin = next_vertex.fetch_add(kVertexBatch, std::memory_order_relaxed);
+            if (begin >= author_count) {
+                break;
+            }
+            const std::uint32_t end = std::min<std::uint32_t>(author_count, begin + kVertexBatch);
+            for (std::uint32_t u = begin; u < end; ++u) {
+                std::vector<std::uint32_t> candidates = out[u];
+                add_author_participation(u, 1, 1ULL);
+                for (const std::uint32_t v : candidates) {
+                    add_author_participation(u, 2, 1ULL);
+                    add_author_participation(v, 2, 1ULL);
+                }
+                clique_vertices.clear();
+                clique_vertices.push_back(u);
+                count_from(1, candidates);
+            }
+            {
+                std::lock_guard<std::mutex> lock(thread_count_mutexes[tid]);
+                thread_counts[tid] = local;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(thread_count_mutexes[tid]);
+            thread_counts[tid] = local;
+        }
+    };
+
+    std::cout << "[并行] 计数线程数=" << worker_count << '\n';
+    std::cout << "[统计结果] 1 阶聚团: " << author_count << "（最终）\n";
+    std::cout << "[统计结果] 2 阶聚团: " << encoded_edges.size() << "（最终）\n";
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (unsigned tid = 0; tid < worker_count; ++tid) {
+        workers.emplace_back(worker, tid);
+    }
+
+    std::vector<unsigned long long> last_progress_counts(3, 0ULL);
+    auto merge_counts_snapshot = [&]() {
+        std::vector<unsigned long long> snapshot(2, 0ULL);
+        std::vector<std::uint8_t> snapshot_saturated(2, 0u);
+        snapshot[1] = author_count;
+        for (unsigned tid = 0; tid < worker_count; ++tid) {
+            std::lock_guard<std::mutex> lock(thread_count_mutexes[tid]);
+            const ThreadCliqueCounts& local = thread_counts[tid];
+            if (local.counts.size() > snapshot.size()) {
+                snapshot.resize(local.counts.size(), 0ULL);
+                snapshot_saturated.resize(local.counts.size(), 0u);
+            }
+            for (std::size_t k = 2; k < local.counts.size(); ++k) {
+                if (local.saturated[k] != 0u || kCountSaturation - snapshot[k] < local.counts[k]) {
+                    snapshot[k] = kCountSaturation;
+                    snapshot_saturated[k] = 1u;
+                } else {
+                    snapshot[k] += local.counts[k];
+                }
+            }
+        }
+        return std::pair{std::move(snapshot), std::move(snapshot_saturated)};
+    };
+
+    while (next_vertex.load(std::memory_order_relaxed) < author_count) {
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        const auto [snapshot, snapshot_saturated] = merge_counts_snapshot();
+        std::uint32_t max_seen_order = 0;
+        const std::uint32_t progress_upper =
+            std::min<std::uint32_t>(requested_max_order, static_cast<std::uint32_t>(snapshot.size() - 1));
+        for (std::uint32_t k = 3; k <= progress_upper; ++k) {
+            if (snapshot[k] != 0ULL) {
+                max_seen_order = k;
+            }
+        }
+        for (std::uint32_t k = 3; k <= max_seen_order; ++k) {
+            if (k >= last_progress_counts.size()) {
+                last_progress_counts.resize(static_cast<std::size_t>(k) + 1, 0ULL);
+            }
+            if (snapshot[k] != last_progress_counts[k]) {
+                std::cout << "[进度] " << k << " 阶聚团当前已发现不少于: " << snapshot[k];
+                if (k < snapshot_saturated.size() && snapshot_saturated[k] != 0u) {
+                    std::cout << "（已饱和）";
+                }
+                std::cout << '\n';
+                last_progress_counts[k] = snapshot[k];
+            }
+        }
+    }
+    for (std::thread& th : workers) {
+        th.join();
+    }
+
+    std::vector<unsigned long long> clique_counts(2, 0ULL);
+    std::vector<std::uint8_t> saturated(2, 0u);
+    clique_counts[1] = author_count;
+    for (const ThreadCliqueCounts& local : thread_counts) {
+        if (local.counts.size() > clique_counts.size()) {
+            clique_counts.resize(local.counts.size(), 0ULL);
+            saturated.resize(local.counts.size(), 0u);
+        }
+        for (std::size_t k = 2; k < local.counts.size(); ++k) {
+            if (local.saturated[k] != 0u || kCountSaturation - clique_counts[k] < local.counts[k]) {
+                clique_counts[k] = kCountSaturation;
+                saturated[k] = 1u;
+            } else {
+                clique_counts[k] += local.counts[k];
+            }
+        }
+    }
+    if (build_author_participation_cache) {
+        std::vector<std::array<unsigned long long, kParticipationMaxOrder + 1>> participation_cache(author_count);
+        for (std::uint32_t aid = 0; aid < author_count; ++aid) {
+            for (std::uint32_t order = 1; order <= kParticipationMaxOrder; ++order) {
+                participation_cache[aid][order] =
+                    author_participation_atomic[static_cast<std::size_t>(aid) * participation_stride + order].load(
+                        std::memory_order_relaxed);
+            }
+        }
+        save_author_participation_cache(participation_cache);
+    }
+
+    save_global_clique_counts_cache(clique_counts, saturated);
+    print_global_clique_counts(clique_counts, saturated);
+
+    const auto t1 = std::chrono::steady_clock::now();
+    const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    std::cout << "[计时] F6 执行总耗时: " << total_ms << " ms\n";
+}
+
+void ExtremeEngine::execute_f7_export_report() const {
+    namespace fs = std::filesystem;
+    const auto t_begin = std::chrono::steady_clock::now();
+    constexpr std::size_t kMaxNeighbors = 50;
+
+    // ----- 0) 选择导出模式 -----
+    std::cout << "\nF7 导出选项:\n";
+    std::cout << "  [1] 全量导出: f3/f4/f6 + Top 100 ego (默认)\n";
+    std::cout << "  [2] 指定作者: 单独导出某位作者的 ego (并刷新 f3/f4/f6)\n";
+    std::cout << "请选择 [1/2，默认 1]: " << std::flush;
+    std::string mode_line;
+    std::getline(std::cin, mode_line);
+    const std::string_view mode_sv = trim_sv(mode_line);
+    const bool single_mode = (mode_sv == "2");
+
+    std::string single_target;
+    if (single_mode) {
+        std::cout << "请输入作者姓名: " << std::flush;
+        std::getline(std::cin, single_target);
+        if (trim_sv(single_target).empty()) {
+            std::cout << "未输入作者，已取消。\n";
+            return;
+        }
+    }
+
+    const fs::path out_dir = locate_f7_output_dir();
+    std::cout << "[F7] 输出目录: " << out_dir.string() << "\n";
+
+    // ----- 1) f3_top100.json -----
+    {
+        std::ofstream f3((out_dir / "f3_top100.json").string(), std::ios::binary);
+        if (!f3) { std::cout << "[F7] 无法写入 f3_top100.json\n"; return; }
+        f3 << "[\n";
+        StringArena local_norm(128u * 1024u);
+        for (std::size_t i = 0; i < f3_top100_cache_.size(); ++i) {
+            const auto& entry = f3_top100_cache_[i];
+            const std::string_view norm_key = entry.second;
+            const std::size_t paper_count = entry.first;
+
+            std::string_view display = norm_key;
+            if (const auto* plist = author_global_.find(norm_key); plist != nullptr) {
+                for (const Posting& p : *plist) {
+                    if (p.doc_id >= forward_index_.size()) continue;
+                    const Document& doc = forward_index_[p.doc_id];
+                    if (doc.authors.empty()) continue;
+                    bool found = false;
+                    for_each_author_segment(doc.authors, [&](std::string_view seg) {
+                        if (found) return;
+                        const std::string_view trimmed = trim_sv(seg);
+                        if (trimmed.empty()) return;
+                        const std::string_view nk = normalized_span(local_norm, trimmed);
+                        if (nk == norm_key) { display = trimmed; found = true; }
+                    });
+                    if (found) break;
+                }
+            }
+
+            f3 << "  {\"rank\": " << (i + 1) << ", \"name\": ";
+            f7_json_write_string(f3, display);
+            f3 << ", \"paper_count\": " << paper_count << "}";
+            if (i + 1 < f3_top100_cache_.size()) f3 << ",";
+            f3 << "\n";
+        }
+        f3 << "]\n";
+    }
+    std::cout << "[F7] f3_top100.json 已写入 (" << f3_top100_cache_.size() << " 条)\n";
+
+    // ----- 2) f4_year_keywords.json -----
+    {
+        std::ofstream f4((out_dir / "f4_year_keywords.json").string(), std::ios::binary);
+        if (!f4) { std::cout << "[F7] 无法写入 f4_year_keywords.json\n"; return; }
+        std::vector<int> years;
+        years.reserve(year_doc_index_.size());
+        for (const auto& kv : year_doc_index_) {
+            if (kv.first > 0 && !kv.second.empty()) years.push_back(kv.first);
+        }
+        std::sort(years.begin(), years.end());
+
+        f4 << "{\n";
+        for (std::size_t yi = 0; yi < years.size(); ++yi) {
+            const int year = years[yi];
+            auto cache_it = f4_top10_cache_.find(year);
+            if (cache_it == f4_top10_cache_.end()) {
+                cache_it = f4_top10_cache_.emplace(year, compute_f4_top10_for_year(year)).first;
+            }
+            const auto& ranked = cache_it->second;
+            f4 << "  \"" << year << "\": [";
+            for (std::size_t ei = 0; ei < ranked.size(); ++ei) {
+                if (ei > 0) f4 << ", ";
+                f4 << "{\"term\": ";
+                f7_json_write_string(f4, ranked[ei].term);
+                f4 << ", \"freq\": " << ranked[ei].freq << "}";
+            }
+            f4 << "]";
+            if (yi + 1 < years.size()) f4 << ",";
+            f4 << "\n";
+        }
+        f4 << "}\n";
+        std::cout << "[F7] f4_year_keywords.json 已写入 (" << years.size() << " 年)\n";
+    }
+
+    // ----- Lambda: 处理单个作者的 ego (含 50 合作者上限) -----
+    auto process_one_ego = [&](std::string_view norm_key) -> std::pair<bool, std::string> {
+        const auto* plist = author_global_.find(norm_key);
+        if (plist == nullptr || plist->empty()) return {false, std::string{}};
+
+        StringArena local_norm(256u * 1024u);
+        std::unordered_map<std::string, std::string> display_by_norm;
+        std::unordered_map<std::string, std::vector<DocID>> docs_by_norm;
+        std::unordered_map<std::string, std::unordered_map<std::string, std::uint32_t>> edge_w;
+
+        const std::string center_norm{norm_key};
+        std::string center_display;
+
+        for (const Posting& po : *plist) {
+            if (po.doc_id >= forward_index_.size()) continue;
+            const Document& doc = forward_index_[po.doc_id];
+            if (doc.authors.empty()) continue;
+
+            std::vector<std::string> doc_norms;
+            std::vector<std::string_view> doc_displays;
+            doc_norms.reserve(8);
+            doc_displays.reserve(8);
+
+            for_each_author_segment(doc.authors, [&](std::string_view seg) {
+                const std::string_view trimmed = trim_sv(seg);
+                if (trimmed.empty()) return;
+                const std::string_view nk = normalized_span(local_norm, trimmed);
+                if (nk.empty()) return;
+                std::string nk_str{nk};
+                display_by_norm.try_emplace(nk_str, std::string{trimmed});
+                doc_norms.push_back(std::move(nk_str));
+                doc_displays.push_back(trimmed);
+            });
+
+            bool contains_center = false;
+            for (const std::string& nk : doc_norms) if (nk == center_norm) { contains_center = true; break; }
+            if (!contains_center) continue;
+
+            if (center_display.empty()) {
+                for (std::size_t k = 0; k < doc_norms.size(); ++k) {
+                    if (doc_norms[k] == center_norm) { center_display = std::string{doc_displays[k]}; break; }
+                }
+            }
+
+            for (const std::string& nk : doc_norms) docs_by_norm[nk].push_back(doc.id);
+            for (std::size_t a = 0; a < doc_norms.size(); ++a) {
+                for (std::size_t b = a + 1; b < doc_norms.size(); ++b) {
+                    const std::string& na = doc_norms[a];
+                    const std::string& nb = doc_norms[b];
+                    if (na == nb) continue;
+                    const std::string& lo = na < nb ? na : nb;
+                    const std::string& hi = na < nb ? nb : na;
+                    ++edge_w[lo][hi];
+                }
+            }
+        }
+
+        if (center_display.empty()) center_display = std::string{norm_key};
+
+        // -- 50-合作者上限：按到中心的边权重保留前 50 个 --
+        std::unordered_set<std::string> keep;
+        keep.insert(center_norm);
+        {
+            std::vector<std::pair<std::uint32_t, std::string>> weighted;
+            weighted.reserve(display_by_norm.size());
+            for (const auto& kv : display_by_norm) {
+                if (kv.first == center_norm) continue;
+                std::uint32_t w = 0;
+                const std::string& lo = center_norm < kv.first ? center_norm : kv.first;
+                const std::string& hi = center_norm < kv.first ? kv.first : center_norm;
+                if (auto it = edge_w.find(lo); it != edge_w.end()) {
+                    if (auto jt = it->second.find(hi); jt != it->second.end()) w = jt->second;
+                }
+                weighted.emplace_back(w, kv.first);
+            }
+            std::sort(weighted.begin(), weighted.end(),
+                      [](const auto& a, const auto& b) { return a.first > b.first; });
+            if (weighted.size() > kMaxNeighbors) weighted.resize(kMaxNeighbors);
+            for (auto& p : weighted) keep.insert(std::move(p.second));
+        }
+
+        for (auto it = display_by_norm.begin(); it != display_by_norm.end(); ) {
+            if (keep.find(it->first) == keep.end()) it = display_by_norm.erase(it); else ++it;
+        }
+        for (auto it = docs_by_norm.begin(); it != docs_by_norm.end(); ) {
+            if (keep.find(it->first) == keep.end()) it = docs_by_norm.erase(it); else ++it;
+        }
+        for (auto it = edge_w.begin(); it != edge_w.end(); ) {
+            if (keep.find(it->first) == keep.end()) { it = edge_w.erase(it); continue; }
+            for (auto jt = it->second.begin(); jt != it->second.end(); ) {
+                if (keep.find(jt->first) == keep.end()) jt = it->second.erase(jt); else ++jt;
+            }
+            ++it;
+        }
+
+        // -- 写 ego/<slug>.json --
+        const std::string slug = f7_author_to_slug(center_display);
+        if (slug.empty()) return {false, center_display};
+
+        std::ofstream ego((out_dir / "ego" / (slug + ".json")).string(), std::ios::binary);
+        if (!ego) return {false, center_display};
+
+        std::vector<std::string> node_norms;
+        node_norms.reserve(display_by_norm.size());
+        for (const auto& kv : display_by_norm) node_norms.push_back(kv.first);
+        std::sort(node_norms.begin(), node_norms.end(), [&](const std::string& a, const std::string& b) {
+            if (a == center_norm) return true;
+            if (b == center_norm) return false;
+            return display_by_norm[a] < display_by_norm[b];
+        });
+
+        ego << "{\n  \"center\": ";
+        f7_json_write_string(ego, center_display);
+        ego << ",\n  \"nodes\": [\n";
+        for (std::size_t ni = 0; ni < node_norms.size(); ++ni) {
+            const std::string& nk = node_norms[ni];
+            const std::string& disp = display_by_norm[nk];
+            std::size_t pc = 0;
+            if (const auto* gp = author_global_.find(std::string_view{nk}); gp != nullptr) pc = gp->size();
+            ego << "    {\"id\": ";
+            f7_json_write_string(ego, disp);
+            ego << ", \"paper_count\": " << pc << "}";
+            if (ni + 1 < node_norms.size()) ego << ",";
+            ego << "\n";
+        }
+        ego << "  ],\n  \"edges\": [\n";
+
+        std::size_t total_edges = 0;
+        for (const auto& kv : edge_w) total_edges += kv.second.size();
+        std::size_t edges_written = 0;
+        for (const auto& kv : edge_w) {
+            const std::string& src_disp = display_by_norm[kv.first];
+            for (const auto& kw : kv.second) {
+                const std::string& dst_disp = display_by_norm[kw.first];
+                ego << "    {\"source\": ";
+                f7_json_write_string(ego, src_disp);
+                ego << ", \"target\": ";
+                f7_json_write_string(ego, dst_disp);
+                ego << ", \"weight\": " << kw.second << "}";
+                ++edges_written;
+                if (edges_written < total_edges) ego << ",";
+                ego << "\n";
+            }
+        }
+        ego << "  ],\n  \"papers_by_author\": {\n";
+
+        std::vector<std::string> author_order;
+        author_order.reserve(docs_by_norm.size());
+        author_order.push_back(center_norm);
+        for (const std::string& nk : node_norms) {
+            if (nk != center_norm && docs_by_norm.count(nk) > 0) author_order.push_back(nk);
+        }
+
+        for (std::size_t ai = 0; ai < author_order.size(); ++ai) {
+            const std::string& nk = author_order[ai];
+            const std::string& disp = display_by_norm.count(nk) > 0 ? display_by_norm[nk] : nk;
+            const auto& ids = docs_by_norm[nk];
+            ego << "    ";
+            f7_json_write_string(ego, disp);
+            ego << ": [\n";
+            std::vector<DocID> uniq_ids = ids;
+            std::sort(uniq_ids.begin(), uniq_ids.end());
+            uniq_ids.erase(std::unique(uniq_ids.begin(), uniq_ids.end()), uniq_ids.end());
+            for (std::size_t pi = 0; pi < uniq_ids.size(); ++pi) {
+                if (uniq_ids[pi] >= forward_index_.size()) continue;
+                const Document& doc = forward_index_[uniq_ids[pi]];
+                ego << "      {\"doc_id\": " << doc.id << ", \"title\": ";
+                f7_json_write_string(ego, doc.title);
+                ego << ", \"year\": " << doc.year << ", \"journal\": ";
+                f7_json_write_string(ego, doc.journal);
+                ego << ", \"ee\": ";
+                f7_json_write_string(ego, doc.ee);
+                ego << "}";
+                if (pi + 1 < uniq_ids.size()) ego << ",";
+                ego << "\n";
+            }
+            ego << "    ]";
+            if (ai + 1 < author_order.size()) ego << ",";
+            ego << "\n";
+        }
+
+        ego << "  }\n}\n";
+        return {true, center_display};
+    };
+
+    // ----- 3) Ego 导出 -----
+    std::size_t ego_emitted = 0;
+    std::size_t ego_skipped = 0;
+    if (single_mode) {
+        const std::string_view target_key = build_normalized_lookup_key(single_target);
+        if (target_key.empty()) {
+            std::cout << "[F7] 无法规范化作者姓名。\n";
+        } else {
+            auto [ok, display] = process_one_ego(target_key);
+            if (ok) {
+                ++ego_emitted;
+                std::cout << "[F7] 已导出 " << display << " 的 ego JSON\n";
+            } else {
+                std::cout << "[F7] 未找到 \"" << single_target << "\" 的文献记录\n";
+            }
+        }
+    } else {
+        for (std::size_t i = 0; i < f3_top100_cache_.size(); ++i) {
+            const std::string_view norm_key = f3_top100_cache_[i].second;
+            auto [ok, display] = process_one_ego(norm_key);
+            (void)display;
+            if (ok) {
+                ++ego_emitted;
+                if ((ego_emitted % 10) == 0) std::cout << "[F7] 已导出 " << ego_emitted << " 个 ego 文件…\n";
+            } else {
+                ++ego_skipped;
+            }
+        }
+    }
+
+    // ----- 4) f6_clique_counts.json：优先读取缓存，无缓存则在线计算基础数据 -----
+    {
+        std::map<std::uint32_t, unsigned long long> counts;
+        std::uint32_t loaded_k = 0;
+        std::string loaded_path;
+
+        // 尝试从 F6 缓存加载完整数据
+        for (std::uint32_t k = 128; k >= 2; --k) {
+            const fs::path candidate = locate_f6_global_clique_counts_file_path(k);
+            std::error_code ec;
+            if (!fs::exists(candidate, ec) || ec) continue;
+            std::ifstream in(candidate, std::ios::binary);
+            if (!in.is_open()) continue;
+            std::array<char, 8> magic{};
+            in.read(magic.data(), 8);
+            if (!in || std::string_view(magic.data(), 8) != std::string_view("DBLPF6C\0", 8)) continue;
+            std::uint32_t version = 0;
+            in.read(reinterpret_cast<char*>(&version), sizeof(version));
+            if (!in || version != 1u) continue;
+            std::uint64_t docs = 0, authors = 0, edges = 0, papers = 0, skipped = 0, max_authors = 0;
+            std::uint32_t cached_max_order = 0, cached_degeneracy = 0, cached_oriented = 0;
+            if (!read_varuint64(in, docs) || !read_varuint64(in, authors) ||
+                !read_varuint64(in, edges) || !read_varuint64(in, papers) ||
+                !read_varuint64(in, skipped) || !read_varuint64(in, max_authors) ||
+                !read_varuint32(in, cached_max_order) || !read_varuint32(in, cached_degeneracy) ||
+                !read_varuint32(in, cached_oriented)) continue;
+            counts.clear();
+            bool ok = true;
+            for (std::uint32_t order = 1; order <= cached_max_order; ++order) {
+                std::uint64_t value = 0;
+                std::uint32_t saturated_flag = 0;
+                if (!read_varuint64(in, value) || !read_varuint32(in, saturated_flag)) { ok = false; break; }
+                if (order >= 2 && value > 0) counts[order] = value;
+            }
+            if (!ok) continue;
+            loaded_k = cached_max_order;
+            loaded_path = candidate.string();
+            break;
+        }
+
+        // 无缓存时：在线扫描所有论文，统计合作边数（2-阶完全子图）
+        if (loaded_k == 0) {
+            std::cout << "[F7] 未找到全图聚团缓存，正在在线计算合作边数（2-阶聚团）...\n";
+            constexpr std::size_t kMaxAuthorsPerPaper = 64;
+            std::unordered_map<std::string_view, std::uint32_t> author_id;
+            author_id.reserve(author_global_.size() * 2 + 1);
+            std::uint32_t next_id = 0;
+            author_global_.for_each([&](const std::string_view author, const std::vector<Posting>&) {
+                if (!author.empty()) author_id.emplace(author, next_id++);
+            });
+            std::unordered_set<std::uint64_t> edge_set;
+            edge_set.reserve(32u * 1024u * 1024u);
+            std::uint64_t papers_with_authors = 0;
+            std::uint64_t skipped_large_papers = 0;
+            std::size_t max_authors_seen = 0;
+            StringArena scan_arena(256u * 1024u);
+
+            for (const Document& doc : forward_index_) {
+                if (doc.authors.empty()) continue;
+                std::vector<std::uint32_t> ids;
+                ids.reserve(8);
+                for_each_author_segment(doc.authors, [&](const std::string_view seg) {
+                    const std::string_view trimmed = trim_sv(seg);
+                    if (trimmed.empty()) return;
+                    const std::vector<std::string_view> toks = Analyzer::normalize_and_tokenize(trimmed, scan_arena);
+                    if (toks.empty()) return;
+                    const char* beg = toks.front().data();
+                    const char* ed = toks.back().data() + toks.back().size();
+                    const std::string_view key{beg, static_cast<std::size_t>(ed - beg)};
+                    const auto it = author_id.find(key);
+                    if (it != author_id.end()) ids.push_back(it->second);
+                });
+                scan_arena.reset();
+                if (ids.empty()) continue;
+                ++papers_with_authors;
+                std::sort(ids.begin(), ids.end());
+                ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+                max_authors_seen = std::max(max_authors_seen, ids.size());
+                if (ids.size() > kMaxAuthorsPerPaper) {
+                    ++skipped_large_papers;
+                    ids.resize(kMaxAuthorsPerPaper);
+                }
+                for (std::size_t i = 0; i < ids.size(); ++i) {
+                    for (std::size_t j = i + 1; j < ids.size(); ++j) {
+                        const std::uint32_t u = std::min(ids[i], ids[j]);
+                        const std::uint32_t v = std::max(ids[i], ids[j]);
+                        edge_set.insert((static_cast<std::uint64_t>(u) << 32u) | v);
+                    }
+                }
+            }
+            counts[2] = static_cast<unsigned long long>(edge_set.size());
+            loaded_k = 2;
+            std::cout << "[F7] 在线计算完成: 2 阶聚团（合作边）= " << counts[2]
+                      << " (作者数=" << next_id << " 含作者论文=" << papers_with_authors << ")\n";
+        }
+
+        std::ofstream f6((out_dir / "f6_clique_counts.json").string(), std::ios::binary);
+        if (!f6) { std::cout << "[F7] 无法写入 f6_clique_counts.json\n"; return; }
+        f6 << "{";
+        bool first = true;
+        for (const auto& kv : counts) {
+            if (!first) f6 << ", ";
+            first = false;
+            f6 << "\"" << kv.first << "\": " << kv.second;
+        }
+        f6 << "}\n";
+        if (loaded_k > 0) {
+            const char* source = loaded_path.empty() ? "在线计算" : loaded_path.c_str();
+            std::cout << "[F7] f6_clique_counts.json 已写入 (源: " << source
+                      << ", " << counts.size() << " 阶)\n";
+            if (loaded_k <= 2) {
+                std::cout << "[F7] 提示: 需 3+ 阶数据请运行菜单 [7] -> [1] 全图各阶聚团统计，然后重新执行 F7。\n";
+            }
+        } else {
+            std::cout << "[F7] 未能生成聚团数据，f6_clique_counts.json 为空对象。\n";
+        }
+    }
+
+    const auto t_done = std::chrono::steady_clock::now();
+    const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_done - t_begin).count();
+    std::cout << "\n[F7] 导出完成: ego " << ego_emitted << " 个 / 跳过 " << ego_skipped
+              << " 个, 总耗时 " << total_ms << " ms\n";
+    std::cout << "[F7] 前端: 切到项目根目录运行 python -m http.server 8080，浏览器开 /frontend/。\n";
+}

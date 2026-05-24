@@ -1,0 +1,33 @@
+# 大文件 — 队友需自行下载或生成
+dblp.xml
+dblp.xml.gz
+*.seg
+segments/
+
+# C++ 编译产物
+*.exe
+*.dll
+*.o
+*.obj
+build/CMakeCache.txt
+build/CMakeFiles/
+build/Makefile
+build/cmake_install.cmake
+
+# ego 数据 (改为 API 实时查询，无需打包)
+build/data/ego/
+
+# 测试/临时目录
+build2/
+build_test/
+
+# Python
+__pycache__/
+*.pyc
+
+# CMake 内部文件
+build/.cmake/
+
+# IDE
+.vscode/
+.idea/

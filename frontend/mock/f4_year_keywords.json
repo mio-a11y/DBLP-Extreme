@@ -1,0 +1,98 @@
+{
+  "2018": [
+    {"term": "learning", "freq": 4821},
+    {"term": "deep", "freq": 3954},
+    {"term": "network", "freq": 3742},
+    {"term": "neural", "freq": 3401},
+    {"term": "model", "freq": 2987},
+    {"term": "data", "freq": 2754},
+    {"term": "graph", "freq": 2103},
+    {"term": "attention", "freq": 1876},
+    {"term": "image", "freq": 1734},
+    {"term": "based", "freq": 1654}
+  ],
+  "2019": [
+    {"term": "learning", "freq": 5234},
+    {"term": "neural", "freq": 4521},
+    {"term": "deep", "freq": 4321},
+    {"term": "graph", "freq": 3654},
+    {"term": "network", "freq": 3421},
+    {"term": "model", "freq": 3102},
+    {"term": "attention", "freq": 2543},
+    {"term": "transformer", "freq": 1987},
+    {"term": "data", "freq": 1876},
+    {"term": "based", "freq": 1623}
+  ],
+  "2020": [
+    {"term": "learning", "freq": 6342},
+    {"term": "neural", "freq": 5421},
+    {"term": "deep", "freq": 4987},
+    {"term": "graph", "freq": 4321},
+    {"term": "transformer", "freq": 3654},
+    {"term": "model", "freq": 3421},
+    {"term": "attention", "freq": 2987},
+    {"term": "covid", "freq": 2543},
+    {"term": "language", "freq": 2103},
+    {"term": "data", "freq": 1876}
+  ],
+  "2021": [
+    {"term": "learning", "freq": 7234},
+    {"term": "neural", "freq": 5876},
+    {"term": "graph", "freq": 5234},
+    {"term": "transformer", "freq": 4876},
+    {"term": "deep", "freq": 4321},
+    {"term": "language", "freq": 3987},
+    {"term": "model", "freq": 3654},
+    {"term": "attention", "freq": 3102},
+    {"term": "vision", "freq": 2543},
+    {"term": "pretrained", "freq": 2103}
+  ],
+  "2022": [
+    {"term": "learning", "freq": 8123},
+    {"term": "language", "freq": 6543},
+    {"term": "graph", "freq": 5876},
+    {"term": "transformer", "freq": 5421},
+    {"term": "neural", "freq": 4987},
+    {"term": "model", "freq": 4321},
+    {"term": "diffusion", "freq": 3876},
+    {"term": "attention", "freq": 3421},
+    {"term": "vision", "freq": 2987},
+    {"term": "large", "freq": 2654}
+  ],
+  "2023": [
+    {"term": "learning", "freq": 9234},
+    {"term": "language", "freq": 7654},
+    {"term": "model", "freq": 6543},
+    {"term": "large", "freq": 5876},
+    {"term": "graph", "freq": 5234},
+    {"term": "transformer", "freq": 4876},
+    {"term": "neural", "freq": 4321},
+    {"term": "diffusion", "freq": 3987},
+    {"term": "llm", "freq": 3654},
+    {"term": "vision", "freq": 3102}
+  ],
+  "2024": [
+    {"term": "language", "freq": 10234},
+    {"term": "learning", "freq": 9876},
+    {"term": "model", "freq": 8543},
+    {"term": "large", "freq": 7876},
+    {"term": "llm", "freq": 6543},
+    {"term": "graph", "freq": 5234},
+    {"term": "agent", "freq": 4876},
+    {"term": "neural", "freq": 4321},
+    {"term": "reasoning", "freq": 3987},
+    {"term": "multimodal", "freq": 3654}
+  ],
+  "2025": [
+    {"term": "language", "freq": 11234},
+    {"term": "model", "freq": 9876},
+    {"term": "agent", "freq": 8543},
+    {"term": "learning", "freq": 7876},
+    {"term": "large", "freq": 7234},
+    {"term": "reasoning", "freq": 6543},
+    {"term": "llm", "freq": 5876},
+    {"term": "multimodal", "freq": 4987},
+    {"term": "graph", "freq": 4321},
+    {"term": "neural", "freq": 3987}
+  ]
+}
