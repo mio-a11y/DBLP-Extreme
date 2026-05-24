@@ -5,8 +5,6 @@ dblp.xml.gz
 segments/
 
 # C++ 编译产物
-*.exe
-*.dll
 *.o
 *.obj
 build/CMakeCache.txt
