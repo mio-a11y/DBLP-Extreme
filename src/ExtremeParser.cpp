@@ -7,6 +7,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string_view>
@@ -737,4 +738,120 @@ std::vector<std::unique_ptr<LocalIndex>> ExtremeParser::parse_file(const char* u
     }
 
     return results;
+}
+
+void ExtremeParser::parse_file_streaming(const char* utf8_path,
+                                         std::function<void(std::unique_ptr<LocalIndex>)> on_chunk) {
+    std::ifstream in(utf8_path, std::ios::binary);
+    if (!in) return;
+
+    std::vector<char> carry;
+    carry.reserve(chunk_bytes_);
+    const std::size_t num_slots = max_concurrent_;
+
+    struct WorkItem {
+        std::size_t seq = 0;
+        std::vector<char> chunk;
+    };
+
+    const std::size_t max_queue = std::max<std::size_t>(num_slots, 2);
+    std::deque<WorkItem> work_queue;
+    std::mutex work_mu;
+    std::condition_variable work_cv;
+    std::condition_variable queue_room_cv;
+    bool producer_done = false;
+
+    std::map<std::size_t, std::unique_ptr<LocalIndex>> completed;
+    std::mutex completed_mu;
+    std::condition_variable completed_cv;
+
+    std::vector<std::thread> workers;
+    workers.reserve(num_slots);
+    for (std::size_t i = 0; i < num_slots; ++i) {
+        workers.emplace_back([&]() {
+            for (;;) {
+                WorkItem item;
+                {
+                    std::unique_lock<std::mutex> lk(work_mu);
+                    work_cv.wait(lk, [&]() { return producer_done || !work_queue.empty(); });
+                    if (work_queue.empty()) return;
+                    item = std::move(work_queue.front());
+                    work_queue.pop_front();
+                }
+                queue_room_cv.notify_one();
+                std::unique_ptr<LocalIndex> local = parse_chunk_worker(std::move(item.chunk));
+                {
+                    std::lock_guard<std::mutex> lk(completed_mu);
+                    completed.emplace(item.seq, std::move(local));
+                }
+                completed_cv.notify_one();
+            }
+        });
+    }
+
+    std::size_t submit_seq = 0;
+    bool input_exhausted = false;
+
+    for (;;) {
+        std::vector<char> read_block;
+        if (!input_exhausted) {
+            read_block.resize(chunk_bytes_);
+            in.read(read_block.data(), static_cast<std::streamsize>(read_block.size()));
+            const std::streamsize got = in.gcount();
+            read_block.resize(static_cast<std::size_t>(std::max<std::streamsize>(0, got)));
+            if (got == 0) input_exhausted = true;
+        }
+
+        std::vector<char> work;
+        work.reserve(carry.size() + read_block.size());
+        work.insert(work.end(), carry.begin(), carry.end());
+        work.insert(work.end(), read_block.begin(), read_block.end());
+        carry.clear();
+
+        if (work.empty()) {
+            if (input_exhausted) break;
+            continue;
+        }
+
+        std::size_t safe_end = find_safe_cut_end(work.data(), work.size());
+        if (safe_end == 0) {
+            if (!input_exhausted) {
+                if (work.size() > kMaxCarryBytes) safe_end = work.size();
+                else { carry = std::move(work); continue; }
+            } else {
+                safe_end = work.size();
+            }
+        }
+
+        std::vector<char> chunk(work.begin(), work.begin() + static_cast<std::ptrdiff_t>(safe_end));
+        carry.assign(work.begin() + static_cast<std::ptrdiff_t>(safe_end), work.end());
+
+        {
+            std::unique_lock<std::mutex> lk(work_mu);
+            queue_room_cv.wait(lk, [&]() { return work_queue.size() < max_queue; });
+            work_queue.push_back(WorkItem{submit_seq++, std::move(chunk)});
+        }
+        work_cv.notify_one();
+
+        if (input_exhausted) break;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(work_mu);
+        producer_done = true;
+    }
+    work_cv.notify_all();
+
+    // 关键：按序回调，不累积全部结果
+    for (std::size_t emit_seq = 0; emit_seq < submit_seq; ++emit_seq) {
+        std::unique_lock<std::mutex> lk(completed_mu);
+        completed_cv.wait(lk, [&]() { return completed.find(emit_seq) != completed.end(); });
+        auto it = completed.find(emit_seq);
+        on_chunk(std::move(it->second));
+        completed.erase(it);
+    }
+
+    for (std::thread& th : workers) {
+        if (th.joinable()) th.join();
+    }
 }

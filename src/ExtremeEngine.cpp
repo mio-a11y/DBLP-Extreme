@@ -1470,10 +1470,35 @@ bool ExtremeEngine::try_load_serving_index() {
 
 void ExtremeEngine::merge_local_indexes(std::vector<std::unique_ptr<LocalIndex>> locals) {
     local_storage_ = std::move(locals);
+
+    // 清理旧数据 + 初始化
+    reset_global_indexes();
+    author_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
+    title_exact_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
+    keyword_global_.reserve_capacity(static_cast<std::size_t>(1) << 25);
+
+    std::size_t expected_docs = 0;
+    for (const auto& li : local_storage_) {
+        if (li) expected_docs += li->forward_index.size();
+    }
+    load_f5_keyword_segment_checked(expected_docs);
+
+    dl_sum_merge_ = 0;
+    for (auto& li : local_storage_) {
+        merge_one_local(std::move(li));
+    }
+    local_storage_.clear();
+    finalize_merge_after_streaming();
+}
+
+void ExtremeEngine::reset_global_indexes() {
     forward_index_.clear();
     author_global_.clear();
+    author_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
     title_exact_global_.clear();
+    title_exact_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
     keyword_global_.clear();
+    keyword_global_.reserve_capacity(static_cast<std::size_t>(1) << 25);
     f1_author_trigram_ids_.clear();
     f1_author_lexicon_.clear();
     f1_author_doc_counts_.clear();
@@ -1492,56 +1517,50 @@ void ExtremeEngine::merge_local_indexes(std::vector<std::unique_ptr<LocalIndex>>
     f5_result_cache_fifo_.clear();
     f5_fuzzy_cache_.clear();
     f5_fuzzy_cache_fifo_.clear();
+    dl_sum_merge_ = 0;
+    keyword_segment_loaded_ = false;
+}
 
-    author_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
-    title_exact_global_.reserve_capacity(static_cast<std::size_t>(1) << 23);
-    keyword_global_.reserve_capacity(static_cast<std::size_t>(1) << 25);
+bool ExtremeEngine::load_f5_keyword_segment_checked(std::size_t expected_docs) {
+    keyword_segment_loaded_ = try_load_f5_keyword_segment(expected_docs);
+    return keyword_segment_loaded_;
+}
 
-    std::size_t expected_docs = 0;
-    for (const auto& li : local_storage_) {
-        if (li) {
-            expected_docs += li->forward_index.size();
-        }
+void ExtremeEngine::merge_one_local(std::unique_ptr<LocalIndex> li) {
+    if (!li) return;
+    const DocID base = static_cast<DocID>(forward_index_.size());
+
+    for (const Document& d : li->forward_index) {
+        Document dg = d;
+        dg.id = static_cast<DocID>(base + d.id);
+        forward_index_.push_back(dg);
+        dl_sum_merge_ += static_cast<std::uint64_t>(d.doc_length);
     }
-    const bool keyword_segment_loaded = try_load_f5_keyword_segment(expected_docs);
 
-    std::uint64_t dl_sum = 0;
-
-    for (auto& li : local_storage_) {
-        if (!li) {
-            continue;
+    li->author_inverted.for_each([&](const std::string_view& key, const std::vector<Posting>& vec) {
+        std::vector<Posting>& dest = author_global_[key];
+        for (const Posting& p : vec) {
+            dest.push_back(Posting{static_cast<DocID>(p.doc_id + base), p.tf});
         }
-        const DocID base = static_cast<DocID>(forward_index_.size());
-
-        for (const Document& d : li->forward_index) {
-            Document dg = d;
-            dg.id = static_cast<DocID>(base + d.id);
-            forward_index_.push_back(dg);
-            dl_sum += static_cast<std::uint64_t>(d.doc_length);
+    });
+    li->title_exact_inverted.for_each([&](const std::string_view& key, const std::vector<Posting>& vec) {
+        std::vector<Posting>& dest = title_exact_global_[key];
+        for (const Posting& p : vec) {
+            dest.push_back(Posting{static_cast<DocID>(p.doc_id + base), p.tf});
         }
-
-        li->author_inverted.for_each([&](const std::string_view& key, const std::vector<Posting>& vec) {
-            std::vector<Posting>& dest = author_global_[key];
+    });
+    if (!keyword_segment_loaded_) {
+        li->keyword_inverted.for_each([&](const std::string_view& key, const std::vector<Posting>& vec) {
+            std::vector<Posting>& dest = keyword_global_[key];
             for (const Posting& p : vec) {
                 dest.push_back(Posting{static_cast<DocID>(p.doc_id + base), p.tf});
             }
         });
-        li->title_exact_inverted.for_each([&](const std::string_view& key, const std::vector<Posting>& vec) {
-            std::vector<Posting>& dest = title_exact_global_[key];
-            for (const Posting& p : vec) {
-                dest.push_back(Posting{static_cast<DocID>(p.doc_id + base), p.tf});
-            }
-        });
-        if (!keyword_segment_loaded) {
-            li->keyword_inverted.for_each([&](const std::string_view& key, const std::vector<Posting>& vec) {
-                std::vector<Posting>& dest = keyword_global_[key];
-                for (const Posting& p : vec) {
-                    dest.push_back(Posting{static_cast<DocID>(p.doc_id + base), p.tf});
-                }
-            });
-        }
     }
-    if (!keyword_segment_loaded) {
+}
+
+void ExtremeEngine::finalize_merge_after_streaming() {
+    if (!keyword_segment_loaded_) {
         save_f5_keyword_segment(forward_index_.size());
     }
     rebuild_f3_top100_cache();
@@ -1552,7 +1571,7 @@ void ExtremeEngine::merge_local_indexes(std::vector<std::unique_ptr<LocalIndex>>
     f4_top10_cache_.clear();
 
     const std::size_t n = forward_index_.size();
-    avg_dl_ = n > 0 ? static_cast<float>(static_cast<double>(dl_sum) / static_cast<double>(n)) : 0.0f;
+    avg_dl_ = n > 0 ? static_cast<float>(static_cast<double>(dl_sum_merge_) / static_cast<double>(n)) : 0.0f;
     scoring_board_.assign(n, 0.0f);
     if (!save_serving_index()) {
         std::cerr << "[WarmStart] 警告: 服务段保存失败，下次启动仍会回退到 XML 构建。\n";

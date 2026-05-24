@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -29,6 +30,9 @@ public:
     explicit ExtremeParser(std::size_t max_concurrent_consumers = 0) noexcept;
 
     [[nodiscard]] std::vector<std::unique_ptr<LocalIndex>> parse_file(const char* utf8_path);
+
+    void parse_file_streaming(const char* utf8_path,
+                             std::function<void(std::unique_ptr<LocalIndex>)> on_chunk);
 
     [[nodiscard]] std::size_t chunk_bytes() const noexcept { return chunk_bytes_; }
     [[nodiscard]] std::size_t max_concurrent() const noexcept { return max_concurrent_; }

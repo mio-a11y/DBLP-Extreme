@@ -21,6 +21,10 @@ public:
     ExtremeEngine() = default;
 
     void merge_local_indexes(std::vector<std::unique_ptr<LocalIndex>> locals);
+    void merge_one_local(std::unique_ptr<LocalIndex> li);
+    bool load_f5_keyword_segment_checked(std::size_t expected_docs);
+    void reset_global_indexes();
+    void finalize_merge_after_streaming();
     [[nodiscard]] bool try_load_serving_index();
     bool save_serving_index() const;
 
@@ -167,6 +171,8 @@ private:
     mutable std::deque<std::string> f5_fuzzy_cache_fifo_;
 
     float avg_dl_ = 0.0f;
+    std::uint64_t dl_sum_merge_ = 0;
+    bool keyword_segment_loaded_ = false;
 
     mutable StringArena query_arena_;
     mutable StringArena index_norm_arena_;

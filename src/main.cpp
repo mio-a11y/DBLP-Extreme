@@ -248,15 +248,24 @@ int main(int argc, char* argv[]) {
             }
 
             const auto t_parse_begin = std::chrono::steady_clock::now();
-            ExtremeParser parser(0);
-            std::vector<std::unique_ptr<LocalIndex>> locals = parser.parse_file(xml_path.c_str());
+            ExtremeParser parser(1);  // 单线程，降低内存占用
+            engine.reset_global_indexes();
+            engine.load_f5_keyword_segment_checked(0);  // 跳过缓存，从 XML 构建
+
+            bool any_chunk = false;
+            parser.parse_file_streaming(xml_path.c_str(),
+                [&](std::unique_ptr<LocalIndex> local) {
+                    any_chunk = true;
+                    engine.merge_one_local(std::move(local));
+                });
+
             const auto t_parse_done = std::chrono::steady_clock::now();
-            if (locals.empty()) {
+            if (!any_chunk) {
                 std::cerr << "错误: 解析未产生任何索引分片（文件为空或无法读取）。\n";
                 return 1;
             }
 
-            engine.merge_local_indexes(std::move(locals));
+            engine.finalize_merge_after_streaming();
             const auto t_merge_done = std::chrono::steady_clock::now();
 
             const double parse_sec =
