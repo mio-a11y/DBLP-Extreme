@@ -114,6 +114,33 @@ class CppBackend:
                         results.append({"type": "f6_clique", "data": f6_data})
                     except json.JSONDecodeError:
                         results.append({"type": "error", "message": "F6 JSON 解析失败"})
+                elif line.startswith("BM25META\t"):
+                    parts = line.split("\t")
+                    meta = {"type": "bm25meta", "total_hits": 0, "page": 1, "page_size": 20}
+                    if len(parts) > 1:
+                        try:
+                            meta["total_hits"] = int(parts[1])
+                        except ValueError:
+                            pass
+                    if len(parts) > 2:
+                        try:
+                            meta["page"] = int(parts[2])
+                        except ValueError:
+                            pass
+                    if len(parts) > 3:
+                        try:
+                            meta["page_size"] = int(parts[3])
+                        except ValueError:
+                            pass
+                    # 解析额外 flags
+                    for p in parts[4:]:
+                        if p.startswith("mode:"):
+                            meta["mode"] = p
+                        elif p.startswith("fuzzy:"):
+                            meta["fuzzy"] = p
+                        elif p.startswith("sort:"):
+                            meta["sort"] = p
+                    results.append(meta)
                 elif line.startswith("DOC\t"):
                     parts = line.split("\t")
                     if len(parts) >= 7:
@@ -153,10 +180,15 @@ class CppBackend:
     def search_keyword(self, query: str) -> dict:
         results = self._send_command(f"BM25 {query}")
         docs = [r for r in results if r["type"] == "doc"]
-        return {
+        meta = next((r for r in results if r["type"] == "bm25meta"), None)
+        resp = {
             "docs": docs,
             "total": len(docs),
         }
+        if meta:
+            resp["meta"] = meta
+            resp["total"] = meta.get("total_hits", len(docs))
+        return resp
 
     def search_clique(self, order: int) -> dict:
         results = self._send_command(f"CLIQUE {order}")

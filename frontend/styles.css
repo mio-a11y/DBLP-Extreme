@@ -137,7 +137,7 @@ main { padding: 16px 24px 24px; min-height: calc(100vh - 110px); }
 
 /* ---- Search tabs ---- */
 .search-box {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   background: #fff; padding: 14px 20px; border-radius: 8px;
   box-shadow: 0 1px 3px rgba(0,0,0,0.04);
   margin-bottom: 16px;
@@ -156,6 +156,32 @@ main { padding: 16px 24px 24px; min-height: calc(100vh - 110px); }
 .search-box button:hover { background: #1a2447; }
 .search-box button:disabled { background: #97a0ad; cursor: not-allowed; }
 .search-box .hint { color: #6b7785; font-size: 13px; }
+
+.search-options {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 4px; flex-basis: 100%;
+}
+.opt-label {
+  font-size: 13px; color: #4a5566; display: flex; align-items: center; gap: 4px;
+  cursor: pointer; user-select: none;
+}
+.opt-label input[type="checkbox"] { margin: 0; cursor: pointer; }
+.opt-select {
+  padding: 4px 8px; border: 1px solid #d0d6e0;
+  border-radius: 4px; font-size: 12px; background: #fff;
+}
+
+.pager {
+  display: flex; align-items: center; justify-content: center;
+  gap: 12px; margin-top: 16px; padding: 12px;
+}
+.pager button {
+  padding: 8px 18px; background: #2b3a67; color: #fff;
+  border: none; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.pager button:hover { background: #1a2447; }
+.pager button:disabled { background: #97a0ad; cursor: not-allowed; }
+.pager .page-info { font-size: 13px; color: #4a5566; }
 
 .search-results { display: flex; flex-direction: column; gap: 8px; }
 .result-card {

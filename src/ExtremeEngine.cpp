@@ -1348,21 +1348,25 @@ std::uint32_t ExtremeEngine::doc_length_for(const DocID doc_id) const noexcept {
 }
 
 bool ExtremeEngine::try_load_serving_index() {
+    try {
     namespace fs = std::filesystem;
     const fs::path seg_path = locate_serving_segment_file_path();
     std::error_code ec;
     if (!fs::exists(seg_path, ec) || ec) {
+        std::cerr << "[WarmStart] 服务段文件不存在: " << seg_path << '\n';
         return false;
     }
 
     std::ifstream in(seg_path, std::ios::binary);
     if (!in.is_open()) {
+        std::cerr << "[WarmStart] 无法打开服务段文件: " << seg_path << '\n';
         return false;
     }
 
     std::array<char, 8> magic{};
     in.read(magic.data(), static_cast<std::streamsize>(magic.size()));
     if (!in || std::string_view(magic.data(), magic.size()) != std::string_view("DBLPSV2\0", 8)) {
+        std::cerr << "[WarmStart] 服务段 magic 不匹配\n";
         return false;
     }
 
@@ -1371,9 +1375,11 @@ bool ExtremeEngine::try_load_serving_index() {
     in.read(reinterpret_cast<char*>(&version), sizeof(version));
     in.read(reinterpret_cast<char*>(&loaded_avg_dl), sizeof(loaded_avg_dl));
     if (!in || version != 1u) {
+        std::cerr << "[WarmStart] 服务段版本不兼容: " << version << '\n';
         return false;
     }
 
+    std::cerr << "[WarmStart] 服务段头验证通过，开始清理旧数据…\n";
     serving_arena_.reset();
     segment_term_arena_.reset();
     local_storage_.clear();
@@ -1385,11 +1391,14 @@ bool ExtremeEngine::try_load_serving_index() {
 
     std::uint64_t doc_count = 0;
     if (!read_varuint64(in, doc_count)) {
+        std::cerr << "[WarmStart] 读取 doc_count 失败\n";
         return false;
     }
     if (doc_count > static_cast<std::uint64_t>(std::numeric_limits<DocID>::max())) {
+        std::cerr << "[WarmStart] doc_count 溢出: " << doc_count << '\n';
         return false;
     }
+    std::cerr << "[WarmStart] 文档数: " << doc_count << "，开始加载 forward_index…\n";
     forward_index_.reserve(static_cast<std::size_t>(doc_count));
     for (std::uint64_t i = 0; i < doc_count; ++i) {
         Document doc;
@@ -1419,12 +1428,15 @@ bool ExtremeEngine::try_load_serving_index() {
         }
         forward_index_.push_back(doc);
     }
+    std::cerr << "[WarmStart] forward_index 加载完成 (" << forward_index_.size() << " 篇)，开始加载倒排索引…\n";
 
     if (!read_posting_map(in, serving_arena_, author_global_) ||
         !read_posting_map(in, serving_arena_, title_exact_global_) ||
         !read_posting_map(in, segment_term_arena_, keyword_global_)) {
+        std::cerr << "[WarmStart] 读取 posting_map 失败\n";
         return false;
     }
+    std::cerr << "[WarmStart] 倒排索引加载完成，开始加载 F5 block meta…\n";
 
     std::uint64_t block_term_count = 0;
     if (!read_varuint64(in, block_term_count)) {
@@ -1454,9 +1466,11 @@ bool ExtremeEngine::try_load_serving_index() {
     }
 
     if (!in) {
+        std::cerr << "[WarmStart] 流读取失败\n";
         return false;
     }
 
+    std::cerr << "[WarmStart] 开始重建运行时索引…\n";
     avg_dl_ = loaded_avg_dl;
     scoring_board_.assign(forward_index_.size(), 0.0f);
     rebuild_f3_top100_cache();
@@ -1465,7 +1479,35 @@ bool ExtremeEngine::try_load_serving_index() {
     rebuild_f1_author_fuzzy_index();
     rebuild_f5_partial_match_index();
     f4_top10_cache_.clear();
+    std::cerr << "[WarmStart] 运行时索引重建完成\n";
     return !forward_index_.empty();
+    } catch (const std::bad_alloc& e) {
+        std::cerr << "[WarmStart] 内存不足 (std::bad_alloc): " << e.what() << '\n';
+        forward_index_.clear();
+        forward_index_.shrink_to_fit();
+        author_global_.clear();
+        title_exact_global_.clear();
+        keyword_global_.clear();
+        f5_term_block_meta_.clear();
+        serving_arena_.reset();
+        segment_term_arena_.reset();
+        scoring_board_.clear();
+        scoring_board_.shrink_to_fit();
+        return false;
+    } catch (const std::exception& e) {
+        std::cerr << "[WarmStart] 异常: " << e.what() << '\n';
+        forward_index_.clear();
+        forward_index_.shrink_to_fit();
+        author_global_.clear();
+        title_exact_global_.clear();
+        keyword_global_.clear();
+        f5_term_block_meta_.clear();
+        serving_arena_.reset();
+        segment_term_arena_.reset();
+        scoring_board_.clear();
+        scoring_board_.shrink_to_fit();
+        return false;
+    }
 }
 
 void ExtremeEngine::merge_local_indexes(std::vector<std::unique_ptr<LocalIndex>> locals) {
@@ -3558,6 +3600,9 @@ void ExtremeEngine::search_collaborators(std::string_view target_author, std::os
     }
 }
 
+// 前向声明（定义在 serve_search_* 区域）
+void serve_emit_doc(const Document& doc, std::ostream& os);
+
 void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5SearchOptions opts) const {
     const auto t_wall0 = std::chrono::steady_clock::now();
     F5SearchProfile* profile = opts.profile;
@@ -3626,6 +3671,8 @@ void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5S
     auto emit_ranked_results = [&](const std::vector<ScoreDoc>& ordered_docs, std::size_t total_hits,
                                    std::size_t matched_query_terms, std::size_t fuzzy_rewrite_count,
                                    bool cache_hit, F5ExecPath path_tag) {
+        constexpr std::size_t kServeMaxHits = 500;
+        if (opts.serve_mode && total_hits > kServeMaxHits) total_hits = kServeMaxHits;
         const auto t_emit0 = std::chrono::steady_clock::now();
         const F5WindowView w = compute_window(total_hits);
         if (profile != nullptr) {
@@ -3639,7 +3686,7 @@ void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5S
                 profile->requested_topk = w.page_size;
             }
         }
-        if (!opts.emit_results) {
+        if (!opts.emit_results && !opts.serve_mode) {
             if (profile != nullptr) {
                 profile->results_emitted = (w.end > w.start) ? (w.end - w.start) : 0;
                 profile->emit_ms =
@@ -3647,37 +3694,54 @@ void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5S
             }
             return;
         }
-        os << "[匹配模式] " << (plan.boolean_mode == F5BooleanMode::And ? "AND" : "OR")
-           << " | [排序] " << (plan.sort_mode == F5SortMode::Newest ? "最新年份" : "相关度")
-           << " | [容错] " << (plan.fuzzy_enabled ? "开启" : "关闭")
-           << '/' << plan.fuzzy_max_edits << '/' << plan.fuzzy_max_expansions
-           << " | [命中词数] " << matched_query_terms
-           << " | [容错改写] " << fuzzy_rewrite_count
-           << " | [总命中] " << total_hits;
-        if (cache_hit) {
-            os << " | [结果缓存] 命中";
-        }
-        if (w.page_mode) {
-            os << " | [页码] " << w.current_page << "/" << w.total_pages
-               << " | [每页数量] " << w.page_size
-               << " | [结果窗口] " << w.start << "-" << (w.end == 0 ? 0 : w.end - 1);
-            if (plan.offset > 0) {
-                os << "\n[提示] page/size 模式下 offset 已忽略。\n";
-            }
-            if (w.current_page < w.total_pages) {
-                os << "\n[提示] 下一页可使用: page:" << (w.current_page + 1) << " size:" << w.page_size << "\n";
-            }
-        } else {
-            os << " | [结果窗口] " << w.start << "-" << (w.end == 0 ? 0 : w.end - 1)
-               << " | [数量限制] " << (plan.limit == 0 ? "全部" : std::to_string(plan.limit));
-        }
-        os << "\n\n";
 
-        for (std::size_t i = w.start; i < w.end; ++i) {
-            const ScoreDoc& e = ordered_docs[i];
-            print_document_details(forward_index_[e.second], os);
-            os << "[排名] " << (i + 1) << '\n';
-            os << "[BM25] " << e.first << "\n\n";
+        if (opts.serve_mode) {
+            // 服务模式：输出机器可解析的格式
+            os << "BM25META\t" << total_hits << '\t' << w.current_page << '\t' << w.page_size
+               << "\tmode:" << (plan.boolean_mode == F5BooleanMode::And ? "and" : "or")
+               << "\tfuzzy:" << (plan.fuzzy_enabled ? std::to_string(plan.fuzzy_max_edits) : "off");
+            if (plan.sort_mode == F5SortMode::Newest) os << "\tsort:newest";
+            if (cache_hit) os << "\tcache:hit";
+            os << '\n';
+            for (std::size_t i = w.start; i < w.end; ++i) {
+                const ScoreDoc& e = ordered_docs[i];
+                if (e.second >= forward_index_.size()) continue;
+                serve_emit_doc(forward_index_[e.second], os);
+            }
+            os << "END\n";
+        } else {
+            os << "[匹配模式] " << (plan.boolean_mode == F5BooleanMode::And ? "AND" : "OR")
+               << " | [排序] " << (plan.sort_mode == F5SortMode::Newest ? "最新年份" : "相关度")
+               << " | [容错] " << (plan.fuzzy_enabled ? "开启" : "关闭")
+               << '/' << plan.fuzzy_max_edits << '/' << plan.fuzzy_max_expansions
+               << " | [命中词数] " << matched_query_terms
+               << " | [容错改写] " << fuzzy_rewrite_count
+               << " | [总命中] " << total_hits;
+            if (cache_hit) {
+                os << " | [结果缓存] 命中";
+            }
+            if (w.page_mode) {
+                os << " | [页码] " << w.current_page << "/" << w.total_pages
+                   << " | [每页数量] " << w.page_size
+                   << " | [结果窗口] " << w.start << "-" << (w.end == 0 ? 0 : w.end - 1);
+                if (plan.offset > 0) {
+                    os << "\n[提示] page/size 模式下 offset 已忽略。\n";
+                }
+                if (w.current_page < w.total_pages) {
+                    os << "\n[提示] 下一页可使用: page:" << (w.current_page + 1) << " size:" << w.page_size << "\n";
+                }
+            } else {
+                os << " | [结果窗口] " << w.start << "-" << (w.end == 0 ? 0 : w.end - 1)
+                   << " | [数量限制] " << (plan.limit == 0 ? "全部" : std::to_string(plan.limit));
+            }
+            os << "\n\n";
+
+            for (std::size_t i = w.start; i < w.end; ++i) {
+                const ScoreDoc& e = ordered_docs[i];
+                print_document_details(forward_index_[e.second], os);
+                os << "[排名] " << (i + 1) << '\n';
+                os << "[BM25] " << e.first << "\n\n";
+            }
         }
         if (profile != nullptr) {
             profile->results_emitted = (w.end > w.start) ? (w.end - w.start) : 0;
@@ -3822,17 +3886,40 @@ void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5S
         }
     };
 
+    const auto has_non_ascii = [](std::string_view s) {
+        for (std::size_t i = 0; i < s.size(); ++i) {
+            if (static_cast<unsigned char>(s[i]) > 127u) return true;
+        }
+        return false;
+    };
     std::vector<std::pair<std::string_view, float>> fuzzy_terms;
     std::size_t fuzzy_rewrite_count = 0;
     for (const std::string_view term : terms) {
+        // 跳过停止词和超短词（精确匹配也不做，避免百万级倒排的慢搜索）
+        if (term.size() < 2 || is_f5_query_stopword(term)) {
+            if (plan.boolean_mode == F5BooleanMode::And) {
+                if (opts.serve_mode) {
+                    os << "BM25META\t0\t1\t0\tmode:and\tfuzzy:off\nEND\n";
+                } else {
+                    os << "未找到匹配结果（AND 模式下有查询词无命中）。\n";
+                }
+                return;
+            }
+            continue;
+        }
         const std::vector<Posting>* exact = get_keyword_postings(term);
         if (exact != nullptr && !exact->empty()) {
             add_scoring_term(term, 1.0f);
             continue;
         }
-        if (!plan.fuzzy_enabled || term.size() < 3 || term.size() > 32 || is_f5_query_stopword(term)) {
+        // 非 ASCII 词（如中文）跳过模糊搜索：UTF-8 字节三元组无法匹配有意义的英文术语
+        if (!plan.fuzzy_enabled || term.size() < 3 || term.size() > 32 || has_non_ascii(term)) {
             if (plan.boolean_mode == F5BooleanMode::And) {
-                os << "未找到匹配结果（AND 模式下有查询词无命中）。\n";
+                if (opts.serve_mode) {
+                    os << "BM25META\t0\t1\t0\tmode:and\tfuzzy:off\nEND\n";
+                } else {
+                    os << "未找到匹配结果（AND 模式下有查询词无命中）。\n";
+                }
                 return;
             }
             continue;
@@ -3842,7 +3929,11 @@ void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5S
         collect_f5_fuzzy_candidates(term, plan.fuzzy_max_edits, fuzzy_terms);
         if (fuzzy_terms.empty()) {
             if (plan.boolean_mode == F5BooleanMode::And) {
-                os << "未找到匹配结果（AND 模式下有查询词无命中）。\n";
+                if (opts.serve_mode) {
+                    os << "BM25META\t0\t1\t0\tmode:and\tfuzzy:off\nEND\n";
+                } else {
+                    os << "未找到匹配结果（AND 模式下有查询词无命中）。\n";
+                }
                 return;
             }
             continue;
@@ -3859,11 +3950,15 @@ void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5S
                 break;
             }
         }
-        os << "[容错] " << term << " -> " << fuzzy_terms.front().first << '\n';
+        if (!opts.serve_mode) {
+            os << "[容错] " << term << " -> " << fuzzy_terms.front().first << '\n';
+        }
     }
 
     if (scoring_terms.empty()) {
-        if (opts.emit_results) {
+        if (opts.serve_mode) {
+            os << "BM25META\t0\t1\t0\tmode:or\tfuzzy:off\nEND\n";
+        } else if (opts.emit_results) {
             os << "未找到匹配结果。\n";
         }
         if (profile != nullptr) {
@@ -4289,7 +4384,10 @@ void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5S
     }
 
     if (matched_query_terms == 0) {
-        if (opts.emit_results) {
+        if (opts.serve_mode) {
+            os << "BM25META\t0\t1\t0\tmode:" << (plan.boolean_mode == F5BooleanMode::And ? "and" : "or")
+               << "\tfuzzy:" << (plan.fuzzy_enabled ? std::to_string(plan.fuzzy_max_edits) : "off") << "\nEND\n";
+        } else if (opts.emit_results) {
             os << "未找到匹配结果。\n";
         }
         if (profile != nullptr) {
@@ -4346,7 +4444,10 @@ void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5S
     }
 
     if (ordered.empty()) {
-        if (opts.emit_results) {
+        if (opts.serve_mode) {
+            os << "BM25META\t0\t1\t0\tmode:" << (plan.boolean_mode == F5BooleanMode::And ? "and" : "or")
+               << "\tfuzzy:" << (plan.fuzzy_enabled ? std::to_string(plan.fuzzy_max_edits) : "off") << "\nEND\n";
+        } else if (opts.emit_results) {
             os << "未找到匹配结果。\n";
         }
         for (const DocID did : modified_docs) {
@@ -4385,7 +4486,9 @@ void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5S
         return a.second < b.second;
     };
 
-    const std::size_t total_hits = ordered.size();
+    constexpr std::size_t kServeMaxHits = 500;
+    const std::size_t raw_total_hits = ordered.size();
+    const std::size_t total_hits = (opts.serve_mode && raw_total_hits > kServeMaxHits) ? kServeMaxHits : raw_total_hits;
     std::size_t needed_topk = total_hits;
     if (plan.page > 0 || plan.size > 0) {
         const std::size_t page_size_req = plan.size > 0 ? plan.size : (plan.limit > 0 ? plan.limit : 20);
@@ -4440,8 +4543,6 @@ void ExtremeEngine::search_bm25(std::string_view keywords, std::ostream& os, F5S
 // ========== --serve 模式：结构化搜索输出（供 Python 后端调用） ==========
 // 输出格式: 每行 DOC\tid\ttitle\tyear\tjournal\tauthors\tee，以 END 结束
 
-namespace {
-
 void serve_emit_doc(const Document& doc, std::ostream& os) {
     os << "DOC\t" << doc.id << '\t';
     // 字段中 \t \n \r 替换为空格，避免破坏 TSV 格式
@@ -4461,8 +4562,6 @@ void serve_emit_doc(const Document& doc, std::ostream& os) {
     safe(doc.ee.empty() ? std::string_view{"-"} : doc.ee);
     os << '\n';
 }
-
-} // namespace
 
 void ExtremeEngine::serve_search_author(std::string_view query, std::ostream& os) const {
     const std::string_view key = build_normalized_lookup_key(query);
@@ -4595,57 +4694,14 @@ void ExtremeEngine::serve_search_title(std::string_view query, std::ostream& os)
 }
 
 void ExtremeEngine::serve_search_bm25(std::string_view query, std::ostream& os) const {
-    // 使用 keyword_global_ 索引加速
-    std::vector<std::string_view> terms;
-    {
-        std::string qcopy(query);
-        for (char& c : qcopy) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        std::size_t pos = 0;
-        while (pos < qcopy.size()) {
-            while (pos < qcopy.size() && qcopy[pos] == ' ') ++pos;
-            if (pos >= qcopy.size()) break;
-            std::size_t end = pos;
-            while (end < qcopy.size() && qcopy[end] != ' ') ++end;
-            terms.emplace_back(qcopy.data() + pos, end - pos);
-            pos = end;
-        }
-    }
-    if (terms.empty()) {
+    if (query.empty()) {
         os << "ERROR\t查询为空\nEND\n";
         return;
     }
-
-    // 候选文档及命中统计
-    std::unordered_map<DocID, std::size_t> hit_map;
-    for (std::string_view tok : terms) {
-        const std::vector<Posting>* plist = keyword_global_.find(tok);
-        if (plist != nullptr) {
-            for (const Posting& po : *plist) {
-                if (po.doc_id < forward_index_.size()) {
-                    ++hit_map[po.doc_id];
-                    if (hit_map.size() >= 50000) break;
-                }
-            }
-        }
-        if (hit_map.size() >= 50000) break;
-    }
-
-    // 按命中数排序
-    std::vector<std::pair<std::size_t, DocID>> scored;
-    scored.reserve(hit_map.size());
-    for (const auto& [doc_id, hits] : hit_map) {
-        scored.emplace_back(hits, doc_id);
-    }
-    std::sort(scored.begin(), scored.end(),
-              [](const auto& a, const auto& b) { return a.first > b.first; });
-
-    std::size_t emitted = 0;
-    for (const auto& [score, doc_id] : scored) {
-        if (doc_id >= forward_index_.size()) continue;
-        serve_emit_doc(forward_index_[doc_id], os);
-        if (++emitted >= 500) break;
-    }
-    os << "END\n";
+    F5SearchOptions opts;
+    opts.emit_results = true;
+    opts.serve_mode = true;
+    search_bm25(query, os, opts);
 }
 
 void ExtremeEngine::serve_ego_network(std::string_view raw_name, std::ostream& os) const {

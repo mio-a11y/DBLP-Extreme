@@ -51,5 +51,6 @@ struct F5SearchProfile {
 
 struct F5SearchOptions {
     bool emit_results = true;
+    bool serve_mode = false;
     F5SearchProfile* profile = nullptr;
 };

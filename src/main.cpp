@@ -235,6 +235,22 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << "[WarmStart] 未找到或无法加载服务段，回退到 XML 构建。\n";
             }
+
+            // 如果服务段文件存在但加载失败，大概率是内存不足
+            // 此时 XML 解析也会失败，不如提前退出，给用户明确的指引
+            {
+                std::error_code ec;
+                const bool seg_exists = std::filesystem::exists("segments/serving_index.seg", ec);
+                if (!rebuild_mode && seg_exists && !ec) {
+                    std::cerr << "\n[错误] 服务段文件存在但加载失败，很可能是内存不足（需要约 12-14 GB 空闲内存）。\n";
+                    std::cerr << "请尝试以下操作:\n";
+                    std::cerr << "  1. 关闭其他应用程序释放内存\n";
+                    std::cerr << "  2. 使用 --rebuild 标志重新构建（跳过损坏的服务段）\n";
+                    std::cerr << "  3. 增加 Windows 虚拟内存（页面文件）大小\n";
+                    return 1;
+                }
+            }
+
             try {
                 if (!std::filesystem::exists(xml_path)) {
                     std::cerr << "错误: 找不到数据文件 \"" << xml_path << "\"。\n";
@@ -253,11 +269,20 @@ int main(int argc, char* argv[]) {
             engine.load_f5_keyword_segment_checked(0);
 
             bool any_chunk = false;
-            parser.parse_file_streaming(xml_path.c_str(),
-                [&](std::unique_ptr<LocalIndex> local) {
-                    any_chunk = true;
-                    engine.merge_one_local(std::move(local));
-                });
+            try {
+                parser.parse_file_streaming(xml_path.c_str(),
+                    [&](std::unique_ptr<LocalIndex> local) {
+                        any_chunk = true;
+                        engine.merge_one_local(std::move(local));
+                    });
+            } catch (const std::exception& ex) {
+                std::cerr << "[错误] XML 解析异常: " << ex.what() << "\n";
+                std::cerr << "可能是内存不足。请关闭其他程序后重试。\n";
+                return 1;
+            } catch (...) {
+                std::cerr << "[错误] XML 解析未知异常，可能是内存不足。\n";
+                return 1;
+            }
 
             const auto t_parse_done = std::chrono::steady_clock::now();
             if (!any_chunk) {
@@ -265,7 +290,13 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
-            engine.finalize_merge_after_streaming();
+            try {
+                engine.finalize_merge_after_streaming();
+            } catch (const std::exception& ex) {
+                std::cerr << "[错误] 归并异常: " << ex.what() << "\n";
+                std::cerr << "可能是内存不足。请关闭其他程序后重试。\n";
+                return 1;
+            }
             const auto t_merge_done = std::chrono::steady_clock::now();
 
             const double parse_sec =

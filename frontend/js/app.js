@@ -160,18 +160,37 @@ async function doSearchTitle() {
   }
 }
 
-async function doSearchKeyword() {
+async function doSearchKeyword(pageNum = 1) {
   const input = document.getElementById("sk-input");
   const btn = document.getElementById("sk-btn");
   const hint = document.getElementById("sk-hint");
   const q = input.value.trim();
   if (!q) return;
 
+  // 构建带选项的查询字符串
+  const fuzzyCb = document.getElementById("sk-fuzzy");
+  const fuzzyLevel = document.getElementById("sk-fuzzy-level").value;
+  const modeAnd = document.getElementById("sk-mode-and").checked;
+  const sortSel = document.getElementById("sk-sort").value;
+  const sizeSel = document.getElementById("sk-size").value;
+
+  let queryStr = q;
+  if (fuzzyCb && !fuzzyCb.checked) {
+    queryStr += " fuzzy:off";
+  } else {
+    queryStr += ` fuzzy:${fuzzyLevel} fuzzyexp:8`;
+  }
+  if (modeAnd) queryStr += " mode:and";
+  if (sortSel === "newest") queryStr += " sort:newest";
+  queryStr += ` page:${pageNum} size:${sizeSel}`;
+
   btn.disabled = true;
   hint.textContent = "搜索中…";
   try {
-    const data = await apiSearch("keyword", q);
-    renderSearchResults("sk-results", "sk-hint", data, q);
+    const data = await apiSearch("keyword", queryStr);
+    // 保存当前查询状态用于翻页
+    state.keywordQuery = { q, queryStr, data, pageNum };
+    renderKeywordResults(data, q, pageNum);
   } catch (e) {
     hint.textContent = `搜索失败: ${e.message}`;
     document.getElementById("sk-results").innerHTML = "";
@@ -179,6 +198,74 @@ async function doSearchKeyword() {
     btn.disabled = false;
   }
 }
+
+function renderKeywordResults(data, query, pageNum) {
+  const container = document.getElementById("sk-results");
+  const hint = document.getElementById("sk-hint");
+  const pager = document.getElementById("sk-pager");
+
+  if (data.error) {
+    hint.textContent = `错误: ${data.error}`;
+    container.innerHTML = "";
+    pager.style.display = "none";
+    return;
+  }
+
+  const docs = data.docs || [];
+  const meta = data.meta || {};
+  const totalHits = meta.total_hits || data.total || docs.length;
+  const pageSize = meta.page_size || 20;
+  const totalPages = Math.max(1, Math.ceil(totalHits / pageSize));
+
+  let hintParts = [`找到 ${totalHits} 条结果`];
+  if (meta.mode && meta.mode.endsWith("and")) hintParts.push("AND 模式");
+  if (meta.sort && meta.sort.endsWith("newest")) hintParts.push("按年份排序");
+  if (meta.fuzzy && meta.fuzzy !== "fuzzy:off") hintParts.push(`容错: ${meta.fuzzy.replace("fuzzy:", "编辑距离 ")}`);
+  hint.textContent = hintParts.join(" | ");
+
+  if (docs.length === 0) {
+    container.innerHTML = '<div class="loading">未找到匹配结果，请尝试其他关键词或关闭"必须包含所有词"。</div>';
+    pager.style.display = "none";
+    return;
+  }
+
+  let html = "";
+  for (const doc of docs) {
+    const title = escapeHtml(doc.title);
+    const year = doc.year || "?";
+    const journal = escapeHtml(doc.journal);
+    const authors = escapeHtml(doc.authors);
+    const ee = doc.ee && doc.ee !== "-" ? doc.ee : null;
+
+    html += `<div class="result-card">
+      <div class="r-title">${ee ? `<a href="${escapeHtml(ee)}" target="_blank" rel="noopener">${title}</a>` : title}</div>
+      <div class="r-meta">
+        ${authors !== "-" ? `<span><span class="label">作者</span> ${authors}</span>` : ""}
+        <span><span class="label">年份</span> ${year}</span>
+        ${journal !== "-" ? `<span><span class="label">期刊</span> ${journal}</span>` : ""}
+      </div>
+    </div>`;
+  }
+  container.innerHTML = html;
+
+  // 分页控件
+  if (totalPages > 1) {
+    let phtml = "";
+    phtml += `<button ${pageNum <= 1 ? "disabled" : ""} onclick="window._skGoTo(${pageNum - 1})">上一页</button>`;
+    phtml += `<span class="page-info">第 ${pageNum} / ${totalPages} 页</span>`;
+    phtml += `<button ${pageNum >= totalPages ? "disabled" : ""} onclick="window._skGoTo(${pageNum + 1})">下一页</button>`;
+    pager.innerHTML = phtml;
+    pager.style.display = "flex";
+  } else {
+    pager.style.display = "none";
+  }
+}
+
+// 全局分页跳转辅助
+window._skGoTo = function(pageNum) {
+  document.getElementById("sk-results").innerHTML = '<div class="loading">加载中…</div>';
+  doSearchKeyword(pageNum);
+};
 
 // ---------- 可视化 Tab 逻辑 (原有) ----------
 async function pickDefaultAuthor() {
@@ -358,11 +445,37 @@ async function bootstrap() {
     if (e.key === "Enter") doSearchTitle();
   });
 
-  // 关键字搜索
-  document.getElementById("sk-btn").addEventListener("click", doSearchKeyword);
-  document.getElementById("sk-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") doSearchKeyword();
-  });
+  // 关键字搜索（防抖 300ms，减少大索引下的卡顿）
+  {
+    let skTimer = null;
+    const skInput = document.getElementById("sk-input");
+    const skDebounce = () => {
+      if (skTimer) clearTimeout(skTimer);
+      skTimer = setTimeout(doSearchKeyword, 300);
+    };
+    skInput.addEventListener("input", skDebounce);
+    skInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        if (skTimer) { clearTimeout(skTimer); skTimer = null; }
+        doSearchKeyword();
+      }
+    });
+    document.getElementById("sk-btn").addEventListener("click", () => {
+      if (skTimer) { clearTimeout(skTimer); skTimer = null; }
+      doSearchKeyword();
+    });
+
+    // 搜索选项变更时立即重新搜索
+    const skReSearch = () => {
+      if (skTimer) { clearTimeout(skTimer); skTimer = null; }
+      doSearchKeyword();
+    };
+    document.getElementById("sk-fuzzy").addEventListener("change", skReSearch);
+    document.getElementById("sk-fuzzy-level").addEventListener("change", skReSearch);
+    document.getElementById("sk-mode-and").addEventListener("change", skReSearch);
+    document.getElementById("sk-sort").addEventListener("change", skReSearch);
+    document.getElementById("sk-size").addEventListener("change", skReSearch);
+  }
 
   // 合作关系图
   document.getElementById("render-btn").addEventListener("click", () => {
