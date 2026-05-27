@@ -27,31 +27,18 @@ mkdir -p build
 # 将 dblp.xml (约 5GB) 放入 build/ 目录
 ```
 
-### 3. 编译 C++ 引擎
 
-```bash
-cd build
-
-# Windows (MinGW)
-cmake -G "MinGW Makefiles" ..
-cmake --build .
-
-# Linux / macOS
-cmake ..
-cmake --build .
-```
-
-### 4. 首次运行（构建索引缓存）
+### 3. 首次运行（构建索引缓存）
 
 ```bash
 ./dblp_extreme
 ```
 
-等待约 30 分钟，程序会自动解析 XML 并生成二进制索引缓存到 `segments/` 目录。后续启动将直接加载缓存，几秒内就绪。
+等待约 5 分钟，程序会自动解析 XML 并生成二进制索引缓存到 `segments/` 目录。后续启动将直接加载缓存，几秒内就绪。
 
 看到交互菜单后按 Ctrl+C 退出。
 
-### 5. 启动 Web 服务
+### 4. 启动 Web 服务
 
 ```bash
 cd ..          # 回到项目根目录
@@ -67,7 +54,7 @@ python server.py
 ==============================================================
 ```
 
-### 6. 打开浏览器
+### 5. 打开浏览器
 
 访问 **http://localhost:8080/**
 
@@ -106,16 +93,3 @@ python server.py
     ├── segments/           # (首次运行自动生成)
     └── data/               # 导出数据 (Top100/年度热词/聚团)
 ```
-
-## 可选：预编译 Windows exe
-
-如果你和队友都使用 Windows 64 位，可单独分享以下文件让队友跳过编译步骤：
-
-```
-build/dblp_extreme.exe
-build/libgcc_s_seh-1.dll
-build/libstdc++-6.dll
-build/libwinpthread-1.dll
-```
-
-放到 `build/` 目录下即可直接使用。
