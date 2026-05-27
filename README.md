@@ -26,7 +26,19 @@ cd Datastructure-Project-DBLP-main
 # 将 dblp.xml (约 5GB) 放入 build/ 目录
 ```
 
-### 3. 启动 Web 服务
+### 3. 编译项目
+
+```bash
+cd build
+cmake ..
+make -j$(nproc)
+cd ..
+```
+
+> Windows 使用 MinGW：`cmake -G "MinGW Makefiles" .. && mingw32-make -j$(nproc)`  
+> 编译产物为 `build/dblp_extreme.exe`（Windows）或 `build/dblp_extreme`（Linux/macOS）。
+
+### 4. 启动 Web 服务
 
 ```bash
 python server.py
@@ -41,7 +53,7 @@ python server.py
 ==============================================================
 ```
 
-### 4. 打开浏览器
+### 5. 打开浏览器
 
 访问 **http://localhost:8080/**
 
