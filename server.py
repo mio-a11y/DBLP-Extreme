@@ -163,22 +163,34 @@ class CppBackend:
                         results.append({"type": "unknown", "raw": line})
             return results
 
-    def search_author(self, query: str) -> dict:
+    def search_author(self, query: str, page: int = 1, page_size: int = 20) -> dict:
         results = self._send_command(f"AUTHOR {query}")
         docs = [r for r in results if r["type"] == "doc"]
         meta = next((r for r in results if r["type"] in ("author_info", "fuzzy_info")), None)
+        total = len(docs)
+        if meta:
+            total = meta.get("paper_count", len(docs))
+        start = (page - 1) * page_size
+        docs = docs[start:start + page_size]
         return {
             "docs": docs,
-            "total": len(docs),
+            "total": total,
+            "page": page,
+            "page_size": page_size,
             "meta": meta,
         }
 
-    def search_title(self, query: str) -> dict:
+    def search_title(self, query: str, page: int = 1, page_size: int = 20) -> dict:
         results = self._send_command(f"TITLE {query}")
         docs = [r for r in results if r["type"] == "doc"]
+        total = len(docs)
+        start = (page - 1) * page_size
+        docs = docs[start:start + page_size]
         return {
             "docs": docs,
-            "total": len(docs),
+            "total": total,
+            "page": page,
+            "page_size": page_size,
         }
 
     def search_keyword(self, query: str) -> dict:
@@ -264,12 +276,16 @@ class APIHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 self._handle_api(lambda: backend.search_ego(name))
         elif path == "/api/search/author":
+            page = max(1, int(qs.get("page", ["1"])[0]))
+            size = max(1, min(100, int(qs.get("size", ["20"])[0])))
             self._handle_api(lambda: backend.search_author(
-                qs.get("q", [""])[0]
+                qs.get("q", [""])[0], page, size
             ))
         elif path == "/api/search/title":
+            page = max(1, int(qs.get("page", ["1"])[0]))
+            size = max(1, min(100, int(qs.get("size", ["20"])[0])))
             self._handle_api(lambda: backend.search_title(
-                qs.get("q", [""])[0]
+                qs.get("q", [""])[0], page, size
             ))
         elif path == "/api/search/keyword":
             self._handle_api(lambda: backend.search_keyword(

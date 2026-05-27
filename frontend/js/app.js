@@ -72,30 +72,35 @@ async function showTab(tabName) {
 // ---------- API 调用 ----------
 const API_BASE = window.location.origin + "/api";
 
-async function apiSearch(endpoint, query) {
-  const url = `${API_BASE}/search/${endpoint}?q=${encodeURIComponent(query)}`;
+async function apiSearch(endpoint, query, extraParams = {}) {
+  const params = new URLSearchParams({ q: query, ...extraParams });
+  const url = `${API_BASE}/search/${endpoint}?${params}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(`API ${r.status}`);
   return r.json();
 }
 
 // ---------- 搜索结果渲染 ----------
-function renderSearchResults(containerId, hintId, data, query) {
+function renderSearchResults(containerId, hintId, pagerId, data, query) {
   const container = document.getElementById(containerId);
   const hint = document.getElementById(hintId);
+  const pager = pagerId ? document.getElementById(pagerId) : null;
 
   if (data.error) {
     hint.textContent = `错误: ${data.error}`;
     container.innerHTML = "";
+    if (pager) pager.style.display = "none";
     return;
   }
 
   const docs = data.docs || [];
-  hint.textContent = query ? `找到 ${data.total} 条结果` : "";
+  const totalHits = data.total || docs.length;
+  hint.textContent = query ? `找到 ${totalHits} 条结果` : "";
 
   if (docs.length === 0) {
     container.innerHTML =
       '<div class="loading">未找到匹配结果，请尝试其他关键词。</div>';
+    if (pager) pager.style.display = "none";
     return;
   }
 
@@ -127,10 +132,28 @@ function renderSearchResults(containerId, hintId, data, query) {
     </div>`;
   }
   container.innerHTML = html;
+
+  // 分页控件
+  if (pager && data.page && data.page_size) {
+    const pageNum = data.page;
+    const pageSize = data.page_size;
+    const totalPages = Math.max(1, Math.ceil(totalHits / pageSize));
+    if (totalPages > 1) {
+      const goToFn = pagerId === "sa-pager" ? "_saGoTo" : "_stGoTo";
+      let phtml = "";
+      phtml += `<button ${pageNum <= 1 ? "disabled" : ""} onclick="window.${goToFn}(${pageNum - 1})">上一页</button>`;
+      phtml += `<span class="page-info">第 ${pageNum} / ${totalPages} 页</span>`;
+      phtml += `<button ${pageNum >= totalPages ? "disabled" : ""} onclick="window.${goToFn}(${pageNum + 1})">下一页</button>`;
+      pager.innerHTML = phtml;
+      pager.style.display = "flex";
+      return;
+    }
+  }
+  if (pager) pager.style.display = "none";
 }
 
 // ---------- 搜索处理 ----------
-async function doSearchAuthor() {
+async function doSearchAuthor(pageNum = 1) {
   const input = document.getElementById("sa-input");
   const btn = document.getElementById("sa-btn");
   const hint = document.getElementById("sa-hint");
@@ -140,17 +163,19 @@ async function doSearchAuthor() {
   btn.disabled = true;
   hint.textContent = "搜索中…";
   try {
-    const data = await apiSearch("author", q);
-    renderSearchResults("sa-results", "sa-hint", data, q);
+    const data = await apiSearch("author", q, { page: pageNum, size: 20 });
+    state.authorQuery = { q, data, pageNum };
+    renderSearchResults("sa-results", "sa-hint", "sa-pager", data, q);
   } catch (e) {
     hint.textContent = `搜索失败: ${e.message}`;
     document.getElementById("sa-results").innerHTML = "";
+    document.getElementById("sa-pager").style.display = "none";
   } finally {
     btn.disabled = false;
   }
 }
 
-async function doSearchTitle() {
+async function doSearchTitle(pageNum = 1) {
   const input = document.getElementById("st-input");
   const btn = document.getElementById("st-btn");
   const hint = document.getElementById("st-hint");
@@ -160,15 +185,27 @@ async function doSearchTitle() {
   btn.disabled = true;
   hint.textContent = "搜索中…";
   try {
-    const data = await apiSearch("title", q);
-    renderSearchResults("st-results", "st-hint", data, q);
+    const data = await apiSearch("title", q, { page: pageNum, size: 20 });
+    state.titleQuery = { q, data, pageNum };
+    renderSearchResults("st-results", "st-hint", "st-pager", data, q);
   } catch (e) {
     hint.textContent = `搜索失败: ${e.message}`;
     document.getElementById("st-results").innerHTML = "";
+    document.getElementById("st-pager").style.display = "none";
   } finally {
     btn.disabled = false;
   }
 }
+
+// 全局分页跳转
+window._saGoTo = function(pageNum) {
+  document.getElementById("sa-results").innerHTML = '<div class="loading">加载中…</div>';
+  doSearchAuthor(pageNum);
+};
+window._stGoTo = function(pageNum) {
+  document.getElementById("st-results").innerHTML = '<div class="loading">加载中…</div>';
+  doSearchTitle(pageNum);
+};
 
 async function doSearchKeyword(pageNum = 1) {
   const input = document.getElementById("sk-input");
@@ -458,13 +495,13 @@ async function bootstrap() {
   });
 
   // 作者搜索
-  document.getElementById("sa-btn").addEventListener("click", doSearchAuthor);
+  document.getElementById("sa-btn").addEventListener("click", () => doSearchAuthor());
   document.getElementById("sa-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doSearchAuthor();
   });
 
   // 标题搜索
-  document.getElementById("st-btn").addEventListener("click", doSearchTitle);
+  document.getElementById("st-btn").addEventListener("click", () => doSearchTitle());
   document.getElementById("st-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doSearchTitle();
   });
@@ -503,6 +540,9 @@ async function bootstrap() {
     const fetchSuggest = async () => {
       const val = skInput.value;
       if (val.length < 1) { closeSuggest(); return; }
+      // 提取前缀（最后一个空格之前的部分），供下拉显示时拼接在补全词前面
+      const lastSpace = val.lastIndexOf(" ");
+      const prefix = lastSpace >= 0 ? val.substring(0, lastSpace + 1) : "";
       try {
         const r = await fetch(`/api/suggest/keyword?q=${encodeURIComponent(val)}`);
         if (!r.ok) { closeSuggest(); return; }
@@ -510,7 +550,7 @@ async function bootstrap() {
         if (data.error || !data.terms || data.terms.length === 0) { closeSuggest(); return; }
         suggestIndex = -1;
         const items = data.terms.map((t, i) =>
-          `<div class="suggest-item" data-idx="${i}" data-term="${escapeHtml(t)}">${escapeHtml(t)}</div>`
+          `<div class="suggest-item" data-idx="${i}" data-term="${escapeHtml(t)}">${escapeHtml(prefix + t)}</div>`
         ).join("");
         skSuggest.innerHTML = items;
         skSuggest.style.display = "";
