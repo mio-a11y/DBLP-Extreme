@@ -26,25 +26,30 @@ cd Datastructure-Project-DBLP-main
 # 将 dblp.xml (约 5GB) 放入 build/ 目录
 ```
 
-### 3. 编译项目
+### 3. 首次构建索引缓存
+
+首次使用需要运行一次 `dblp_extreme.exe`，解析 XML 并生成二进制索引缓存到 `segments/` 目录（约 5-8 分钟）。
 
 ```bash
 cd build
-cmake ..
-make -j$(nproc)
-cd ..
+./dblp_extreme.exe
 ```
 
-> Windows 使用 MinGW：`cmake -G "MinGW Makefiles" .. && mingw32-make -j$(nproc)`  
-> 编译产物为 `build/dblp_extreme.exe`（Windows）或 `build/dblp_extreme`（Linux/macOS）。
+> **Windows 用户**：仓库已包含预编译的 `dblp_extreme.exe` 及所需 DLL 文件，无需编译，直接运行即可。  
+> **Linux/macOS 用户**：需先编译：`cmake .. && make -j$(nproc)`
+
+看到交互菜单后按 `0` 或 Ctrl+C 退出。
+
+后续启动将直接加载缓存，几秒内就绪。
 
 ### 4. 启动 Web 服务
 
 ```bash
+cd ..          # 回到项目根目录
 python server.py
 ```
 
-首次启动约 60-90 秒加载索引并构建缓存，之后看到：
+启动后看到：
 
 ```
 ==============================================================
