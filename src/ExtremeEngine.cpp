@@ -4704,6 +4704,80 @@ void ExtremeEngine::serve_search_bm25(std::string_view query, std::ostream& os) 
     search_bm25(query, os, opts);
 }
 
+void ExtremeEngine::serve_suggest_keyword(std::string_view input, std::ostream& os) const {
+    // 抽取最后一个 token 做 prefix + substring 补全
+    auto trimmed = input;
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back())))
+        trimmed.remove_suffix(1);
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front())))
+        trimmed.remove_prefix(1);
+
+    if (trimmed.empty() || f5_term_lexicon_.empty()) {
+        os << "SUGGEST\nEND\n";
+        return;
+    }
+
+    // 找最后一个 token
+    auto pos = trimmed.find_last_of(" \t");
+    std::string_view last_token = (pos == std::string_view::npos) ? trimmed : trimmed.substr(pos + 1);
+    if (last_token.empty()) {
+        os << "SUGGEST\nEND\n";
+        return;
+    }
+
+    // 转小写（lexicon 中均为小写）
+    std::string last_lower(static_cast<std::size_t>(last_token.size()), '\0');
+    for (std::size_t i = 0; i < last_token.size(); ++i) {
+        char c = last_token[i];
+        last_lower[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+    }
+    const std::string_view last_sv(last_lower);
+
+    // 1. 前缀补全
+    std::vector<std::string_view> prefix_candidates;
+    collect_f5_prefix_candidates(last_sv, prefix_candidates);
+
+    // 2. 子串补全（仅当 token >= 2 字符且前缀结果不足时）
+    std::vector<std::string_view> substring_candidates;
+    if (last_sv.size() >= 2 && prefix_candidates.size() < 5) {
+        collect_f5_substring_candidates(last_sv, substring_candidates);
+    }
+
+    // 合并去重，按文档频率降序排列
+    struct Candidate { std::string_view term; std::uint32_t df; };
+    std::vector<Candidate> ranked;
+    ranked.reserve(prefix_candidates.size() + substring_candidates.size());
+
+    auto add_candidate = [&](std::string_view term) {
+        auto it = std::lower_bound(f5_term_lexicon_.begin(), f5_term_lexicon_.end(), term);
+        if (it != f5_term_lexicon_.end() && *it == term) {
+            auto idx = static_cast<std::size_t>(it - f5_term_lexicon_.begin());
+            std::uint32_t df = idx < f5_term_df_.size() ? f5_term_df_[idx] : 0;
+            ranked.push_back({term, df});
+        }
+    };
+
+    for (auto& t : prefix_candidates) add_candidate(t);
+    for (auto& t : substring_candidates) {
+        // 跳过已在前缀结果中的
+        bool dup = false;
+        for (auto& pc : prefix_candidates) {
+            if (pc == t) { dup = true; break; }
+        }
+        if (!dup) add_candidate(t);
+    }
+
+    std::sort(ranked.begin(), ranked.end(),
+              [](const Candidate& a, const Candidate& b) { return a.df > b.df; });
+
+    constexpr std::size_t kMaxSuggestions = 8;
+    os << "SUGGEST";
+    for (std::size_t i = 0; i < std::min(kMaxSuggestions, ranked.size()); ++i) {
+        os << '\t' << ranked[i].term;
+    }
+    os << "\nEND\n";
+}
+
 void ExtremeEngine::serve_ego_network(std::string_view raw_name, std::ostream& os) const {
     const std::string_view key = build_normalized_lookup_key(raw_name);
     if (key.empty()) {

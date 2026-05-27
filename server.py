@@ -141,6 +141,10 @@ class CppBackend:
                         elif p.startswith("sort:"):
                             meta["sort"] = p
                     results.append(meta)
+                elif line.startswith("SUGGEST"):
+                    parts = line.split("\t")
+                    terms = parts[1:] if len(parts) > 1 else []
+                    results.append({"type": "suggest", "terms": terms})
                 elif line.startswith("DOC\t"):
                     parts = line.split("\t")
                     if len(parts) >= 7:
@@ -210,6 +214,17 @@ class CppBackend:
             return {"error": error["message"]}
         return {"error": "未知错误"}
 
+    def suggest_keyword(self, prefix: str) -> dict:
+        results = self._send_command(f"SUGGEST {prefix}")
+        terms = []
+        for r in results:
+            if r["type"] == "suggest":
+                terms = r["terms"]
+                break
+            elif r["type"] == "error":
+                return {"error": r["message"]}
+        return {"terms": terms}
+
 
 # 全局后端实例
 backend = CppBackend()
@@ -260,6 +275,12 @@ class APIHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_api(lambda: backend.search_keyword(
                 qs.get("q", [""])[0]
             ))
+        elif path == "/api/suggest/keyword":
+            q = qs.get("q", [""])[0]
+            if not q or not q.strip():
+                self._handle_api(lambda: {"terms": []})
+            else:
+                self._handle_api(lambda: backend.suggest_keyword(q))
         elif path == "/api/status":
             self._handle_api(lambda: {"status": "ok"})
         else:

@@ -50,6 +50,7 @@ public:
     void serve_search_author(std::string_view query, std::ostream& os) const;
     void serve_search_title(std::string_view query, std::ostream& os) const;
     void serve_search_bm25(std::string_view query, std::ostream& os) const;
+    void serve_suggest_keyword(std::string_view input, std::ostream& os) const;
     void serve_ego_network(std::string_view author_name, std::ostream& os) const;
     void serve_f6_clique(std::uint32_t max_order, std::ostream& os) const;
 

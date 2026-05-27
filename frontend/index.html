@@ -48,6 +48,7 @@
   <section class="view" id="view-search-keyword">
     <div class="search-box">
       <input id="sk-input" type="text" placeholder="输入关键字（如 graph deep learning）…" autocomplete="off">
+      <div id="sk-suggest" class="suggest-dropdown" style="display:none"></div>
       <button id="sk-btn">搜索</button>
       <div class="search-options">
         <label class="opt-label">
@@ -126,8 +127,13 @@
       <label>年份
         <select id="year-select"></select>
       </label>
+      <span class="chart-toggle">
+        <button class="toggle-btn active" data-view="chart">柱状图</button>
+        <button class="toggle-btn" data-view="cloud">词云</button>
+      </span>
     </div>
-    <div class="chart-wrap tall"><canvas id="year-chart"></canvas></div>
+    <div class="chart-wrap tall" id="year-chart-wrap"><canvas id="year-chart"></canvas></div>
+    <div class="chart-wrap tall" id="year-cloud-wrap" style="display:none"><canvas id="year-cloud"></canvas></div>
   </section>
 
   <!-- Tab: 聚团统计 -->

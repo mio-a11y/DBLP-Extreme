@@ -367,6 +367,8 @@ int main(int argc, char* argv[]) {
                 engine.serve_f6_clique(order, std::cout);
             } else if (cmd.starts_with("EGO ")) {
                 engine.serve_ego_network(cmd.substr(4), std::cout);
+            } else if (cmd.starts_with("SUGGEST ")) {
+                engine.serve_suggest_keyword(cmd.substr(8), std::cout);
             } else {
                 std::cout << "ERROR\t未知命令: " << cmd << "\nEND\n";
             }

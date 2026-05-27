@@ -14,6 +14,7 @@ import {
   renderTop100Chart,
   renderYearChart,
   renderCliqueChart,
+  renderWordCloud,
 } from "./charts.js";
 
 // ---------- 状态 ----------
@@ -51,8 +52,17 @@ async function showTab(tabName) {
   } else if (tabName === "top100" && !state.loaded.top100) {
     await loadTop100View();
     state.loaded.top100 = true;
-  } else if (tabName === "years" && !state.loaded.years) {
-    await loadYearsView();
+  } else if (tabName === "years") {
+    if (!state.loaded.years) {
+      await loadYearsView();
+    }
+    // 每次切换到该 Tab 都重绘（Canvas 在隐藏时尺寸归零）
+    const sel = document.getElementById("year-select");
+    if (state.years && sel.value && state.years[sel.value]) {
+      if (yearViewMode === "cloud") {
+        requestAnimationFrame(() => renderWordCloud(state.years[sel.value]));
+      }
+    }
     state.loaded.years = true;
   } else if (tabName === "cliques") {
     await loadCliquesView();
@@ -370,7 +380,21 @@ function populateYearSelect(data) {
   });
   if (years.length > 0) {
     sel.value = years[0];
-    renderYearChart(data[years[0]]);
+    renderYearView(data[years[0]]);
+  }
+}
+
+let yearViewMode = "chart";
+function renderYearView(yearData) {
+  if (yearViewMode === "chart") {
+    document.getElementById("year-chart-wrap").style.display = "";
+    document.getElementById("year-cloud-wrap").style.display = "none";
+    renderYearChart(yearData);
+  } else {
+    document.getElementById("year-chart-wrap").style.display = "none";
+    document.getElementById("year-cloud-wrap").style.display = "";
+    // 等待 DOM 可见后再渲染，确保 canvas 尺寸正确
+    requestAnimationFrame(() => renderWordCloud(yearData));
   }
 }
 
@@ -445,29 +469,109 @@ async function bootstrap() {
     if (e.key === "Enter") doSearchTitle();
   });
 
-  // 关键字搜索（防抖 300ms，减少大索引下的卡顿）
+  // 关键字搜索（防抖 300ms）+ 输入提示（防抖 120ms）
   {
     let skTimer = null;
+    let suggestTimer = null;
+    let suggestIndex = -1;
     const skInput = document.getElementById("sk-input");
+    const skSuggest = document.getElementById("sk-suggest");
+
     const skDebounce = () => {
       if (skTimer) clearTimeout(skTimer);
       skTimer = setTimeout(doSearchKeyword, 300);
     };
-    skInput.addEventListener("input", skDebounce);
-    skInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        if (skTimer) { clearTimeout(skTimer); skTimer = null; }
-        doSearchKeyword();
+
+    const closeSuggest = () => {
+      skSuggest.style.display = "none";
+      skSuggest.innerHTML = "";
+      suggestIndex = -1;
+    };
+
+    const selectSuggest = (term) => {
+      const val = skInput.value;
+      // 替换最后一个 token 为选中的补全词
+      const lastSpace = val.lastIndexOf(" ");
+      const prefix = lastSpace >= 0 ? val.substring(0, lastSpace + 1) : "";
+      skInput.value = prefix + term;
+      closeSuggest();
+      // 立即搜索
+      if (skTimer) { clearTimeout(skTimer); skTimer = null; }
+      doSearchKeyword();
+    };
+
+    const fetchSuggest = async () => {
+      const val = skInput.value;
+      if (val.length < 1) { closeSuggest(); return; }
+      try {
+        const r = await fetch(`/api/suggest/keyword?q=${encodeURIComponent(val)}`);
+        if (!r.ok) { closeSuggest(); return; }
+        const data = await r.json();
+        if (data.error || !data.terms || data.terms.length === 0) { closeSuggest(); return; }
+        suggestIndex = -1;
+        const items = data.terms.map((t, i) =>
+          `<div class="suggest-item" data-idx="${i}" data-term="${escapeHtml(t)}">${escapeHtml(t)}</div>`
+        ).join("");
+        skSuggest.innerHTML = items;
+        skSuggest.style.display = "";
+        // 绑定点击
+        skSuggest.querySelectorAll(".suggest-item").forEach((el) => {
+          el.addEventListener("mousedown", (e) => {
+            e.preventDefault();
+            selectSuggest(el.dataset.term);
+          });
+        });
+      } catch {
+        closeSuggest();
       }
+    };
+
+    skInput.addEventListener("input", () => {
+      skDebounce();
+      if (suggestTimer) clearTimeout(suggestTimer);
+      suggestTimer = setTimeout(fetchSuggest, 120);
+    });
+    skInput.addEventListener("keydown", (e) => {
+      const items = skSuggest.querySelectorAll(".suggest-item");
+      if (e.key === "ArrowDown" && items.length > 0) {
+        e.preventDefault();
+        suggestIndex = Math.min(suggestIndex + 1, items.length - 1);
+        items.forEach((el, i) => el.classList.toggle("active", i === suggestIndex));
+      } else if (e.key === "ArrowUp" && items.length > 0) {
+        e.preventDefault();
+        suggestIndex = Math.max(suggestIndex - 1, -1);
+        items.forEach((el, i) => el.classList.toggle("active", i === suggestIndex));
+      } else if (e.key === "Enter") {
+        if (suggestIndex >= 0 && items.length > 0) {
+          e.preventDefault();
+          const sel = items[suggestIndex];
+          if (sel) selectSuggest(sel.dataset.term);
+          return;
+        }
+        if (skTimer) { clearTimeout(skTimer); skTimer = null; }
+        closeSuggest();
+        doSearchKeyword();
+      } else if (e.key === "Escape") {
+        closeSuggest();
+      }
+    });
+    skInput.addEventListener("blur", () => {
+      // 延迟关闭，让 mousedown 先触发
+      setTimeout(closeSuggest, 150);
+    });
+    skInput.addEventListener("focus", () => {
+      if (skInput.value.length >= 1) fetchSuggest();
     });
     document.getElementById("sk-btn").addEventListener("click", () => {
       if (skTimer) { clearTimeout(skTimer); skTimer = null; }
+      closeSuggest();
       doSearchKeyword();
     });
 
     // 搜索选项变更时立即重新搜索
     const skReSearch = () => {
       if (skTimer) { clearTimeout(skTimer); skTimer = null; }
+      closeSuggest();
       doSearchKeyword();
     };
     document.getElementById("sk-fuzzy").addEventListener("change", skReSearch);
@@ -502,7 +606,30 @@ async function bootstrap() {
   // 年份选择
   document.getElementById("year-select").addEventListener("change", (e) => {
     if (state.years && state.years[e.target.value]) {
-      renderYearChart(state.years[e.target.value]);
+      renderYearView(state.years[e.target.value]);
+    }
+  });
+
+  // 词云 / 柱状图切换
+  document.querySelectorAll(".toggle-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      yearViewMode = btn.dataset.view;
+      const sel = document.getElementById("year-select");
+      if (state.years && sel.value && state.years[sel.value]) {
+        renderYearView(state.years[sel.value]);
+      }
+    });
+  });
+
+  // 窗口大小变化时重绘词云（Canvas 需要精确尺寸）
+  window.addEventListener("resize", () => {
+    if (yearViewMode === "cloud" && state.years) {
+      const sel = document.getElementById("year-select");
+      if (sel.value && state.years[sel.value]) {
+        renderWordCloud(state.years[sel.value]);
+      }
     }
   });
 
