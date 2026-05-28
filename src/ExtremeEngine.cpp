@@ -4647,22 +4647,17 @@ void ExtremeEngine::serve_search_title(std::string_view query, std::ostream& os)
         }
     }
 
-    // 使用 keyword_global_ 找候选文档
-    std::unordered_set<DocID> candidates;
+    // 使用最稀有 token（倒排列表最短的那个）的文档作为候选集，
+    // 避免常见词（如 "Resource"）的倒排列表太大导致目标文档被截断在 20000 之外。
+    std::size_t emitted = 0;
+    const std::vector<Posting>* best_plist = nullptr;
     for (std::string_view tok : qtokens) {
         const std::vector<Posting>* plist = keyword_global_.find(tok);
-        if (plist != nullptr) {
-            for (const Posting& po : *plist) {
-                if (po.doc_id < forward_index_.size()) {
-                    candidates.insert(po.doc_id);
-                    if (candidates.size() >= 20000) break; // 候选集上限
-                }
-            }
+        if (plist != nullptr && (best_plist == nullptr || plist->size() < best_plist->size())) {
+            best_plist = plist;
         }
-        if (candidates.size() >= 20000) break;
     }
 
-    std::size_t emitted = 0;
     auto emit_if_match = [&](DocID doc_id) {
         if (emitted >= 500) return;
         const Document& doc = forward_index_[doc_id];
@@ -4675,10 +4670,16 @@ void ExtremeEngine::serve_search_title(std::string_view query, std::ostream& os)
         }
     };
 
-    if (!candidates.empty()) {
-        for (DocID id : candidates) emit_if_match(id);
-    } else {
-        // 无候选时回退全量扫描
+    if (best_plist != nullptr) {
+        for (const Posting& po : *best_plist) {
+            if (emitted >= 500) break;
+            if (po.doc_id >= forward_index_.size()) continue;
+            emit_if_match(po.doc_id);
+        }
+    }
+
+    // 索引候选不足或无索引命中时，回退全量扫描
+    if (emitted == 0) {
         for (const Document& doc : forward_index_) {
             if (emitted >= 500) break;
             if (doc.title.empty()) continue;
