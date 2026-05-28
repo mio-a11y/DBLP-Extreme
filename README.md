@@ -7,7 +7,7 @@
 - **g++** (MinGW-w64 on Windows, 或系统自带 on Linux/macOS)
 - **CMake** ≥ 3.16
 - **Python** ≥ 3.8
-- 约 **18 GB** 磁盘空间（XML 5GB + 索引缓存 ~7GB + 内存 7-8GB）
+- 约 **5 GB** 磁盘空间
 
 ## 快速启动
 
