@@ -29,3 +29,16 @@ build/.cmake/
 # IDE
 .vscode/
 .idea/
+
+# 编译产物及备份
+*.exe
+*.dll
+*.exe.backup-*
+compile_commands.json
+
+# Python 虚拟环境
+.venv/
+venv/
+
+# 日志
+*.log
