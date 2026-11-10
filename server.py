@@ -39,8 +39,14 @@ class CppBackend:
         if self._started:
             return
         print("[Backend] 启动 C++ --serve 进程...")
+        command = [str(EXE_PATH), "--serve"]
+        for variable, flag in (("DBLP_INDEX_CHUNK_MB", "--index-chunk-mb"),
+                               ("DBLP_INDEX_WORKERS", "--index-workers"),
+                               ("DBLP_INDEX_INFLIGHT", "--index-inflight")):
+            if variable in os.environ:
+                command.append(f"{flag}={os.environ[variable]}")
         self._proc = subprocess.Popen(
-            [str(EXE_PATH), "--serve"],
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

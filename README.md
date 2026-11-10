@@ -48,6 +48,40 @@ cd build
 
 后续启动将直接加载缓存，几秒内就绪。
 
+#### 低峰值内存构建（Devbox）
+
+更新源码后先停止旧进程，再从项目根目录执行 `python3 scripts/build_backend.py`。
+默认构建参数为 8 MiB XML 分块、1 个解析线程、最多 2 个待处理分块。
+待处理上限同时覆盖排队、解析和等待合并的分块；已完成分块会在继续读取文件前按序合并。
+分块字符串池使用 1 MiB 小块，避免小 XML 分块各自保留 16 MiB 的预分配空间。
+
+内存紧张时，在 `build/` 目录中使用更保守的参数重新构建：
+
+```bash
+./dblp_extreme --rebuild --index-chunk-mb=4 --index-workers=1 --index-inflight=1
+```
+
+`--rebuild` 会重新解析 XML，不复用已有服务段。构建完成出现菜单后输入 `0` 退出。
+构建耗时较长时建议在 tmux 等可保持会话的终端中执行。
+
+也可以在项目根目录设置环境变量后启动服务；仅在需要从 XML 构建索引时使用这些参数：
+
+```bash
+DBLP_INDEX_CHUNK_MB=4 DBLP_INDEX_WORKERS=1 DBLP_INDEX_INFLIGHT=1 python3 server.py
+```
+
+这些参数限制的是构建过程的额外缓冲，不是整个进程的内存上限。
+全局索引、字符串和查询辅助结构仍需驻留内存，完整数据是否能在某个 Devbox 配置下运行需要实测。
+本次调整没有改变索引文件格式。
+
+开发回归测试（先编译后端）：
+
+```bash
+python3 -m unittest discover -s tests
+g++ -std=c++20 -O2 -pthread -I include tests/parser_streaming_test.cpp src/ExtremeParser.cpp src/Analyzer.cpp -o build/parser_streaming_test
+./build/parser_streaming_test
+```
+
 ### 4. 启动 Web 服务
 
 ```bash

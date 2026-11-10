@@ -9,6 +9,8 @@
 #include <fstream>
 #include <iostream>
 #include <functional>
+#include <exception>
+#include <stdexcept>
 #include <map>
 #include <mutex>
 #include <string_view>
@@ -19,7 +21,6 @@
 
 namespace {
 
-constexpr std::size_t kDefaultChunkBytes = 32u * 1024u * 1024u;
 constexpr std::size_t kMaxCarryBytes = 256u * 1024u * 1024u;
 
 [[nodiscard]] bool is_name_char(unsigned char c) noexcept {
@@ -593,292 +594,159 @@ private:
 
 } // namespace
 
-ExtremeParser::ExtremeParser(std::size_t max_concurrent_consumers) noexcept
-    : chunk_bytes_(kDefaultChunkBytes), max_concurrent_(1) {
+ExtremeParser::ExtremeParser(std::size_t max_concurrent_consumers,
+                             std::size_t chunk_bytes,
+                             std::size_t max_in_flight) noexcept
+    : chunk_bytes_(std::max<std::size_t>(4096, chunk_bytes)), max_concurrent_(1), max_in_flight_(1) {
     const std::size_t hw = std::max<std::size_t>(1u, std::thread::hardware_concurrency());
     if (max_concurrent_consumers == 0) {
-        // Keep one core for OS/terminal responsiveness and cap to laptop-friendly range.
-        const std::size_t soft_cap = std::min<std::size_t>(8, hw > 2 ? hw - 1 : hw);
-        max_concurrent_ = std::max<std::size_t>(1, soft_cap);
+        max_concurrent_ = std::max<std::size_t>(1, std::min<std::size_t>(8, hw > 2 ? hw - 1 : hw));
     } else {
         max_concurrent_ = std::max<std::size_t>(1, max_concurrent_consumers);
     }
+    max_in_flight_ = max_in_flight == 0 ? max_concurrent_ * 2 : std::max<std::size_t>(1, max_in_flight);
+    max_concurrent_ = std::min(max_concurrent_, max_in_flight_);
 }
 
 std::vector<std::unique_ptr<LocalIndex>> ExtremeParser::parse_file(const char* utf8_path) {
-    std::ifstream in(utf8_path, std::ios::binary);
-    if (!in) {
-        return {};
-    }
-
-    std::vector<char> carry;
-    carry.reserve(chunk_bytes_);
-    const std::size_t num_slots = max_concurrent_;
+    // This convenience API deliberately retains all results. Large datasets should
+    // use parse_file_streaming with a consuming callback instead.
     std::vector<std::unique_ptr<LocalIndex>> results;
-    results.reserve(32);
+    parse_file_streaming(utf8_path, [&](std::unique_ptr<LocalIndex> local) {
+        results.push_back(std::move(local));
+    });
+    return results;
+}
+
+void ExtremeParser::parse_file_streaming(const char* utf8_path,
+                                        std::function<void(std::unique_ptr<LocalIndex>)> on_chunk) {
+    std::ifstream in(utf8_path, std::ios::binary);
+    if (!in) throw std::runtime_error("Cannot open XML input");
+    parse_stream(in, std::move(on_chunk));
+}
+
+void ExtremeParser::parse_stream(std::istream& in,
+                                 std::function<void(std::unique_ptr<LocalIndex>)> on_chunk) {
 
     struct WorkItem {
         std::size_t seq = 0;
         std::vector<char> chunk;
     };
-
-    const std::size_t max_queue = std::max<std::size_t>(num_slots, 2);
+    struct Result {
+        std::unique_ptr<LocalIndex> index;
+        std::exception_ptr error;
+    };
     std::deque<WorkItem> work_queue;
     std::mutex work_mu;
     std::condition_variable work_cv;
-    std::condition_variable queue_room_cv;
     bool producer_done = false;
-
-    std::map<std::size_t, std::unique_ptr<LocalIndex>> completed;
+    bool stopping = false;
+    std::map<std::size_t, Result> completed;
     std::mutex completed_mu;
     std::condition_variable completed_cv;
-
     std::vector<std::thread> workers;
-    workers.reserve(num_slots);
-    for (std::size_t i = 0; i < num_slots; ++i) {
+    const std::size_t num_workers = std::min(max_concurrent_, max_in_flight_);
+    workers.reserve(num_workers);
+
+    // Construct before launching any worker. On read/parse/callback/thread-start
+    // failure, stop queued work and join every running worker before state dies.
+    struct WorkerGuard {
+        std::vector<std::thread>& workers;
+        std::mutex& mutex;
+        std::condition_variable& cv;
+        std::deque<WorkItem>& queue;
+        bool& stopping;
+        ~WorkerGuard() {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                stopping = true;
+                queue.clear();
+            }
+            cv.notify_all();
+            for (auto& worker : workers) if (worker.joinable()) worker.join();
+        }
+    } guard{workers, work_mu, work_cv, work_queue, stopping};
+
+    for (std::size_t i = 0; i < num_workers; ++i) {
         workers.emplace_back([&]() {
             for (;;) {
                 WorkItem item;
                 {
-                    std::unique_lock<std::mutex> lk(work_mu);
-                    work_cv.wait(lk, [&]() { return producer_done || !work_queue.empty(); });
-                    if (work_queue.empty()) {
-                        return;
-                    }
+                    std::unique_lock<std::mutex> lock(work_mu);
+                    work_cv.wait(lock, [&]() { return stopping || producer_done || !work_queue.empty(); });
+                    if (stopping || work_queue.empty()) return;
                     item = std::move(work_queue.front());
                     work_queue.pop_front();
                 }
-                queue_room_cv.notify_one();
-
-                std::unique_ptr<LocalIndex> local = parse_chunk_worker(std::move(item.chunk));
+                Result result;
+                try { result.index = parse_chunk_worker(std::move(item.chunk)); }
+                catch (...) { result.error = std::current_exception(); }
                 {
-                    std::lock_guard<std::mutex> lk(completed_mu);
-                    completed.emplace(item.seq, std::move(local));
+                    std::lock_guard<std::mutex> lock(completed_mu);
+                    completed.emplace(item.seq, std::move(result));
                 }
                 completed_cv.notify_one();
             }
         });
     }
 
-    std::size_t submit_seq = 0;
-
-    bool input_exhausted = false;
-
-    for (;;) {
-        std::vector<char> read_block;
-        if (!input_exhausted) {
-            read_block.resize(chunk_bytes_);
-            in.read(read_block.data(), static_cast<std::streamsize>(read_block.size()));
-            const std::streamsize got = in.gcount();
-            read_block.resize(static_cast<std::size_t>(std::max<std::streamsize>(0, got)));
-            if (got == 0) {
-                input_exhausted = true;
-            }
-        }
-
-        std::vector<char> work;
-        work.reserve(carry.size() + read_block.size());
-        work.insert(work.end(), carry.begin(), carry.end());
-        work.insert(work.end(), read_block.begin(), read_block.end());
-        carry.clear();
-
-        if (work.empty()) {
-            if (input_exhausted) {
-                break;
-            }
-            continue;
-        }
-
-        std::size_t safe_end = find_safe_cut_end(work.data(), work.size());
-        if (safe_end == 0) {
-            if (!input_exhausted) {
-                if (work.size() > kMaxCarryBytes) {
-                    safe_end = work.size();
-                } else {
-                    carry = std::move(work);
-                    continue;
-                }
-            } else {
-                safe_end = work.size();
-            }
-        }
-
-        std::vector<char> chunk(work.begin(), work.begin() + static_cast<std::ptrdiff_t>(safe_end));
-        carry.assign(work.begin() + static_cast<std::ptrdiff_t>(safe_end), work.end());
-
+    std::size_t submitted = 0;
+    std::size_t emitted = 0;
+    auto emit_next = [&]() {
+        Result result;
         {
-            std::unique_lock<std::mutex> lk(work_mu);
-            queue_room_cv.wait(lk, [&]() { return work_queue.size() < max_queue; });
-            work_queue.push_back(WorkItem{submit_seq++, std::move(chunk)});
+            std::unique_lock<std::mutex> lock(completed_mu);
+            completed_cv.wait(lock, [&]() { return completed.find(emitted) != completed.end(); });
+            auto item = completed.find(emitted);
+            result = std::move(item->second);
+            completed.erase(item);
         }
-        work_cv.notify_one();
-
-        if (input_exhausted) {
-            break;
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lk(work_mu);
-        producer_done = true;
-    }
-    work_cv.notify_all();
-
-    for (std::size_t emit_seq = 0; emit_seq < submit_seq; ++emit_seq) {
-        std::unique_lock<std::mutex> lk(completed_mu);
-        completed_cv.wait(lk, [&]() { return completed.find(emit_seq) != completed.end(); });
-        auto it = completed.find(emit_seq);
-        results.push_back(std::move(it->second));
-        completed.erase(it);
-    }
-
-    for (std::thread& th : workers) {
-        if (th.joinable()) {
-            th.join();
-        }
-    }
-
-    return results;
-}
-
-void ExtremeParser::parse_file_streaming(const char* utf8_path,
-                                         std::function<void(std::unique_ptr<LocalIndex>)> on_chunk) {
-    std::ifstream in(utf8_path, std::ios::binary);
-    if (!in) return;
-
-    std::vector<char> carry;
-    carry.reserve(chunk_bytes_);
-    const std::size_t num_slots = max_concurrent_;
-
-    struct WorkItem {
-        std::size_t seq = 0;
-        std::vector<char> chunk;
+        if (result.error) std::rethrow_exception(result.error);
+        on_chunk(std::move(result.index));
+        ++emitted;
     };
 
-    const std::size_t max_queue = std::max<std::size_t>(num_slots, 2);
-    std::deque<WorkItem> work_queue;
-    std::mutex work_mu;
-    std::condition_variable work_cv;
-    std::condition_variable queue_room_cv;
-    bool producer_done = false;
-
-    std::map<std::size_t, std::unique_ptr<LocalIndex>> completed;
-    std::mutex completed_mu;
-    std::condition_variable completed_cv;
-
-    std::vector<std::thread> workers;
-    workers.reserve(num_slots);
-    for (std::size_t i = 0; i < num_slots; ++i) {
-        workers.emplace_back([&]() {
-            for (;;) {
-                WorkItem item;
-                {
-                    std::unique_lock<std::mutex> lk(work_mu);
-                    work_cv.wait(lk, [&]() { return producer_done || !work_queue.empty(); });
-                    if (work_queue.empty()) return;
-                    item = std::move(work_queue.front());
-                    work_queue.pop_front();
-                }
-                queue_room_cv.notify_one();
-                try {
-                    std::unique_ptr<LocalIndex> local = parse_chunk_worker(std::move(item.chunk));
-                    {
-                        std::lock_guard<std::mutex> lk(completed_mu);
-                        completed.emplace(item.seq, std::move(local));
-                    }
-                    completed_cv.notify_one();
-                } catch (const std::exception& e) {
-                    std::cerr << "[ERROR] worker 异常: " << e.what() << " (chunk #" << item.seq << ")\n";
-                    std::lock_guard<std::mutex> lk(completed_mu);
-                    completed.emplace(item.seq, nullptr);
-                    completed_cv.notify_one();
-                } catch (...) {
-                    std::cerr << "[ERROR] worker 未知异常 (chunk #" << item.seq << ")\n";
-                    std::lock_guard<std::mutex> lk(completed_mu);
-                    completed.emplace(item.seq, nullptr);
-                    completed_cv.notify_one();
-                }
-            }
-        });
-    }
-
-    std::size_t submit_seq = 0;
-    bool input_exhausted = false;
-
+    std::vector<char> carry;
+    bool exhausted = false;
     for (;;) {
-        std::vector<char> read_block;
-        if (!input_exhausted) {
-            read_block.resize(chunk_bytes_);
-            in.read(read_block.data(), static_cast<std::streamsize>(read_block.size()));
-            const std::streamsize got = in.gcount();
-            read_block.resize(static_cast<std::size_t>(std::max<std::streamsize>(0, got)));
-            if (got == 0) input_exhausted = true;
+        // Bound the TOTAL pending work, including queued, parsing and completed
+        // chunks. Bounding only work_queue leaves completed results unbounded.
+        while (submitted - emitted >= max_in_flight_) emit_next();
+
+        // Read into the eventual worker buffer instead of keeping read_block,
+        // work and chunk copies of the same XML bytes alive simultaneously.
+        std::vector<char> chunk = std::move(carry);
+        if (!exhausted) {
+            const std::size_t offset = chunk.size();
+            chunk.resize(offset + chunk_bytes_);
+            in.read(chunk.data() + offset, static_cast<std::streamsize>(chunk_bytes_));
+            if (in.bad()) throw std::runtime_error("Failed reading XML input");
+            chunk.resize(offset + static_cast<std::size_t>(in.gcount()));
+            exhausted = in.eof();
         }
-
-        std::vector<char> work;
-        work.reserve(carry.size() + read_block.size());
-        work.insert(work.end(), carry.begin(), carry.end());
-        work.insert(work.end(), read_block.begin(), read_block.end());
-        carry.clear();
-
-        if (work.empty()) {
-            if (input_exhausted) break;
+        if (chunk.empty()) break;
+        std::size_t safe_end = find_safe_cut_end(chunk.data(), chunk.size());
+        if (safe_end == 0 && !exhausted) {
+            if (chunk.size() > kMaxCarryBytes) {
+                throw std::runtime_error("XML record exceeds the parser carry limit");
+            }
+            carry = std::move(chunk);
             continue;
         }
-
-        std::size_t safe_end = find_safe_cut_end(work.data(), work.size());
-        if (safe_end == 0) {
-            if (!input_exhausted) {
-                if (work.size() > kMaxCarryBytes) safe_end = work.size();
-                else { carry = std::move(work); continue; }
-            } else {
-                safe_end = work.size();
-            }
-        }
-
-        std::vector<char> chunk(work.begin(), work.begin() + static_cast<std::ptrdiff_t>(safe_end));
-        carry.assign(work.begin() + static_cast<std::ptrdiff_t>(safe_end), work.end());
-
+        if (safe_end == 0) safe_end = chunk.size();
+        carry.assign(chunk.begin() + static_cast<std::ptrdiff_t>(safe_end), chunk.end());
+        chunk.resize(safe_end);
         {
-            std::unique_lock<std::mutex> lk(work_mu);
-            queue_room_cv.wait(lk, [&]() { return work_queue.size() < max_queue; });
-            work_queue.push_back(WorkItem{submit_seq++, std::move(chunk)});
+            std::lock_guard<std::mutex> lock(work_mu);
+            work_queue.push_back(WorkItem{submitted++, std::move(chunk)});
         }
         work_cv.notify_one();
-
-        if (input_exhausted) break;
+        if (exhausted && carry.empty()) break;
     }
-
     {
-        std::lock_guard<std::mutex> lk(work_mu);
+        std::lock_guard<std::mutex> lock(work_mu);
         producer_done = true;
     }
     work_cv.notify_all();
-
-    // RAII: 确保 worker 线程在函数退出前全部 join
-    struct WorkerGuard {
-        std::vector<std::thread>& w;
-        ~WorkerGuard() {
-            for (std::thread& th : w) {
-                if (th.joinable()) th.join();
-            }
-        }
-    } guard{workers};
-
-    // 按序回调，边处理边释放，避免堆积
-    for (std::size_t emit_seq = 0; emit_seq < submit_seq; ++emit_seq) {
-        std::unique_ptr<LocalIndex> local;
-        {
-            std::unique_lock<std::mutex> lk(completed_mu);
-            completed_cv.wait(lk, [&]() { return completed.find(emit_seq) != completed.end(); });
-            auto it = completed.find(emit_seq);
-            local = std::move(it->second);
-            completed.erase(it);
-        }
-        if (local == nullptr) {
-            std::cerr << "[ERROR] chunk #" << emit_seq << " 解析失败\n";
-            break;
-        }
-        on_chunk(std::move(local));
-    }
+    while (emitted < submitted) emit_next();
 }

@@ -4,12 +4,15 @@
 #include "QuerySuite.h"
 
 #include <chrono>
+#include <charconv>
 #include <clocale>
 #include <exception>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <utility>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -159,6 +162,9 @@ int main(int argc, char* argv[]) {
         (void)std::setlocale(LC_ALL, "C.UTF-8");
     }
 
+    std::size_t index_chunk_mb = 8;
+    std::size_t index_workers = 1;
+    std::size_t index_in_flight = 2;
     bool benchmark_mode = false;
     bool rebuild_mode = false;
     bool f6_mode = false;
@@ -168,6 +174,32 @@ int main(int argc, char* argv[]) {
     std::string xml_path = default_xml_path();
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i] != nullptr ? std::string(argv[i]) : std::string{};
+        if (arg == "--help" || arg == "-h") {
+            std::cout << "Usage: dblp_extreme [dblp.xml] [--serve] [--rebuild]\n"
+                      << "  --index-chunk-mb=N   XML chunk MiB (1-64; default 8)\n"
+                      << "  --index-workers=N    Parser workers (1-8; default 1)\n"
+                      << "  --index-inflight=N   Total pending chunks (1-16; default 2)\n";
+            return 0;
+        }
+        bool index_option = false;
+        for (const auto& option : {
+                 std::pair<std::string_view, std::size_t*>{"--index-chunk-mb=", &index_chunk_mb},
+                 {"--index-workers=", &index_workers},
+                 {"--index-inflight=", &index_in_flight}}) {
+            if (arg.rfind(option.first, 0) != 0) continue;
+            const std::string_view value = std::string_view(arg).substr(option.first.size());
+            std::size_t parsed = 0;
+            const auto converted = std::from_chars(value.data(), value.data() + value.size(), parsed);
+            const std::size_t maximum = option.second == &index_chunk_mb ? 64 : (option.second == &index_workers ? 8 : 16);
+            if (converted.ec != std::errc{} || converted.ptr != value.data() + value.size() || parsed < 1 || parsed > maximum) {
+                std::cerr << "Invalid index option: " << arg << " (range 1-" << maximum << ")\n";
+                return 2;
+            }
+            *option.second = parsed;
+            index_option = true;
+            break;
+        }
+        if (index_option) continue;
         if (arg == "--benchmark" || arg == "-b") {
             benchmark_mode = true;
             continue;
@@ -264,7 +296,9 @@ int main(int argc, char* argv[]) {
             }
 
             const auto t_parse_begin = std::chrono::steady_clock::now();
-            ExtremeParser parser(1);
+            ExtremeParser parser(index_workers, index_chunk_mb * 1024u * 1024u, index_in_flight);
+            std::cout << "[IndexBuild] chunk=" << index_chunk_mb << " MiB, workers=" << index_workers
+                      << ", max_inflight=" << index_in_flight << "\n";
             engine.reset_global_indexes();
             engine.load_f5_keyword_segment_checked(0);
 
