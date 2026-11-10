@@ -497,6 +497,11 @@ async function doComputeClique() {
   const info = document.getElementById("clique-info");
   const order = parseInt(document.getElementById("clique-order-select").value, 10);
 
+  if (!Number.isInteger(order) || order < 2 || order > 5) {
+    hint.textContent = "聚团最大阶数只能选择 2 至 5。";
+    return;
+  }
+
   btn.disabled = true;
   hint.textContent = `正在计算 ${order} 阶聚团…`;
   info.style.display = "none";

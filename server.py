@@ -231,6 +231,8 @@ class CppBackend:
         return resp
 
     def search_clique(self, order: int) -> dict:
+        if not 2 <= order <= 5:
+            raise ValueError("聚团最大阶数只能选择 2 至 5")
         results = self._send_command(f"CLIQUE {order}")
         f6 = next((r for r in results if r["type"] == "f6_clique"), None)
         error = next((r for r in results if r["type"] == "error"), None)
@@ -291,7 +293,11 @@ class APIHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 order = int(qs.get("order", ["5"])[0])
             except ValueError:
-                order = 5
+                self.send_error(400, "Clique order must be an integer from 2 to 5")
+                return
+            if not 2 <= order <= 5:
+                self.send_error(400, "Clique order must be from 2 to 5")
+                return
             self._handle_api(lambda: backend.search_clique(order))
         elif path == "/api/ego":
             name = qs.get("name", [""])[0]
