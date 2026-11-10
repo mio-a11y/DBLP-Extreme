@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#183b50">
 <meta name="description" content="DBLP 学术文献检索与合作网络分析工作台。探索作者、论文与研究趋势。">
 <title>DBLP Extreme · 学术探索工作台</title>
-<link rel="stylesheet" href="styles.css?v=academic-20261110-2">
+<link rel="stylesheet" href="styles.css?v=keyword-fix-20261110-1">
 <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -56,7 +56,7 @@
     <div class="search-box">
       <div class="search-panel-heading"><span class="panel-kicker">检索条件</span><span class="panel-caption">研究关键词 / DBLP</span></div>
       <label class="field-label" for="sk-input">研究关键词</label>
-      <div class="search-row"><div class="search-field"><svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5M8 10h5"/></svg><input id="sk-input" type="search" placeholder="输入研究主题或关键词" autocomplete="off" aria-describedby="sk-hint"><div id="sk-suggest" class="suggest-dropdown" style="display:none"></div></div><button id="sk-btn" class="primary-button">检索文献 <svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16m-6-6 6 6-6 6"/></svg></button></div>
+      <div class="search-row"><div class="search-field"><svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5M8 10h5"/></svg><input id="sk-input" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="sk-suggest" type="search" placeholder="输入研究主题或关键词" autocomplete="off" aria-describedby="sk-hint sk-suggest-status"><div id="sk-suggest" role="listbox" aria-label="关键词建议" class="suggest-dropdown" style="display:none"></div></div><button id="sk-btn" class="primary-button">检索文献 <svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16m-6-6 6 6-6 6"/></svg></button></div>
       <div class="search-options">
         <label class="opt-label">
           <input type="checkbox" id="sk-fuzzy" checked> 模糊搜索
@@ -77,7 +77,7 @@
           <option value="50">每页 50</option>
         </select>
       </div>
-      <div class="search-examples"><span>试着搜索</span><button type="button" class="example-chip" data-search-target="sk" data-query="graph deep learning">graph deep learning<span aria-hidden="true">↗</span></button><button type="button" class="example-chip" data-search-target="sk" data-query="information retrieval">information retrieval<span aria-hidden="true">↗</span></button></div><span id="sk-hint" class="hint" role="status" aria-live="polite"></span>
+      <div class="search-examples"><span>试着搜索</span><button type="button" class="example-chip" data-search-target="sk" data-query="graph deep learning">graph deep learning<span aria-hidden="true">↗</span></button><button type="button" class="example-chip" data-search-target="sk" data-query="information retrieval">information retrieval<span aria-hidden="true">↗</span></button></div><span id="sk-suggest-status" class="hint" role="status" aria-live="polite"></span><span id="sk-hint" class="hint" role="status" aria-live="polite"></span>
     </div>
     <div id="sk-results" class="search-results" role="region" aria-label="检索结果" aria-live="polite"><div class="empty-state"><span class="empty-glyph"><svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6C9 3 5 3 2 4v15c3-1 7-1 10 2 3-3 7-3 10-2V4c-3-1-7-1-10 2Zm0 0v15"/></svg></span><h2>把一个想法，变成研究线索。</h2><p>支持多关键词、模糊匹配和年份排序，逐步聚焦你的研究主题。</p><span class="empty-tip">输入后按 Enter，或点击「检索文献」</span></div></div>
     <div id="sk-pager" class="pager" style="display:none"></div>
@@ -172,6 +172,6 @@
 <footer class="footer"><span><strong>DBLP Extreme</strong> · 科学文献检索与可视化</span><span>探索文献之间的连接 <span class="footer-divider">/</span> 数据来源 DBLP</span></footer>
 </div>
 
-<script type="module" src="js/app.js?v=academic-20261110-2"></script>
+<script type="module" src="js/app.js?v=keyword-fix-20261110-1"></script>
 </body>
 </html>

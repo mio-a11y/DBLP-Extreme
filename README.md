@@ -15,7 +15,7 @@
 
 ```bash
 git clone https://github.com/mio-a11y/DBLP-Extreme.git
-cd Datastructure-Project-DBLP-main
+cd DBLP-Extreme
 ```
 
 ### 2. 下载数据文件
@@ -26,7 +26,13 @@ cd Datastructure-Project-DBLP-main
 # 将 dblp.xml (约 5GB) 放入 build/ 目录
 ```
 
-### 3. 首次构建索引缓存
+### 3. 编译后端并构建索引缓存
+
+在项目根目录先执行：
+
+```bash
+python scripts/build_backend.py
+```
 
 首次使用需要运行一次 `dblp_extreme.exe`，解析 XML 并生成二进制索引缓存到 `segments/` 目录（约 5-8 分钟）。
 
@@ -35,8 +41,8 @@ cd build
 ./dblp_extreme.exe
 ```
 
-> **Windows 用户**：仓库已包含预编译的 `dblp_extreme.exe` 及所需 DLL 文件，无需编译，直接运行即可。  
-> **Linux/macOS 用户**：需先编译：`cmake .. && make -j$(nproc)`
+> **更新源码后必须重新编译后端**：旧版可执行程序可能不支持自动补全、年份排序及分页参数，不能只更新 HTML/JS。先停止正在运行的服务，再在项目根目录执行 `python scripts/build_backend.py`。脚本适用于 Windows（MinGW-w64）和 Linux/macOS（g++），不会删除 DBLP 数据或索引。
+> 也可以使用 CMake 编译，但须确保最新编译产物位于 `build/dblp_extreme.exe`（Windows）或 `build/dblp_extreme`（Linux/macOS）。
 
 看到交互菜单后按 `0` 或 Ctrl+C 退出。
 

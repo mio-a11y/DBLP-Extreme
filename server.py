@@ -7,6 +7,8 @@ DBLP Extreme 后端 API 服务器
 用法: python server.py [--port 8080]
 """
 
+from __future__ import annotations
+
 import http.server
 import json
 import os
@@ -22,7 +24,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = ROOT_DIR / "frontend"
 BUILD_DIR = ROOT_DIR / "build"
-EXE_PATH = BUILD_DIR / "dblp_extreme.exe"
+EXE_PATH = BUILD_DIR / ("dblp_extreme.exe" if os.name == "nt" else "dblp_extreme")
 
 
 class CppBackend:
@@ -47,15 +49,31 @@ class CppBackend:
             errors="replace",
             cwd=str(BUILD_DIR),
         )
+        # Always consume diagnostics: an unread stderr pipe can deadlock the engine.
+        threading.Thread(target=self._drain_stderr, args=(self._proc,), daemon=True).start()
         # 等待 "[SERVE] Ready" 信号
+        ready = False
         for line in self._proc.stdout:
             if "[SERVE] Ready" in line:
+                ready = True
                 break
             # 转发其他启动输出到终端
             if line.strip():
                 print(f"  [C++] {line.rstrip()}")
+        if not ready:
+            self._proc.wait()
+            raise RuntimeError(f"C++ 后端启动失败（退出码 {self._proc.returncode}），请检查数据、索引和上方日志")
         self._started = True
+        probe = self._send_command("SUGGEST zzqbackendcompatibilityprobe")
+        if any(item["type"] == "error" for item in probe):
+            self.stop()
+            raise RuntimeError("C++ 后端版本过旧，不支持关键词补全。请先执行 python scripts/build_backend.py，再启动服务")
         print("[Backend] C++ 进程就绪")
+
+    @staticmethod
+    def _drain_stderr(proc):
+        for line in proc.stderr:
+            print(f"[C++ stderr] {line.rstrip()}", file=sys.stderr)
 
     def stop(self):
         if self._proc and self._proc.poll() is None:
@@ -397,12 +415,13 @@ def main():
     try:
         backend.start()
     except Exception as e:
+        backend.stop()
         print(f"[FATAL] 无法启动 C++ 后端: {e}")
-        print("请确保已编译 DBLP_Extreme: cd build && cmake --build .")
+        print("请确保已编译当前源码: python scripts/build_backend.py")
         sys.exit(1)
 
     # 启动 HTTP 服务器
-    server = http.server.HTTPServer(("0.0.0.0", port), APIHandler)
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", port), APIHandler)
     print(f"\n{'='*60}")
     print(f"  DBLP Extreme 搜索服务已启动")
     print(f"  前端地址: http://localhost:{port}/")

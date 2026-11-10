@@ -1,3 +1,4 @@
+import { bindKeywordControls } from "./keyword-controls.js?v=keyword-fix-20261110-1";
 // 入口：搜索 Tab + 可视化 Tab 路由、事件绑定
 
 import {
@@ -98,10 +99,10 @@ async function showTab(tabName) {
 // ---------- API 调用 ----------
 const API_BASE = window.location.origin + "/api";
 
-async function apiSearch(endpoint, query, extraParams = {}) {
+async function apiSearch(endpoint, query, extraParams = {}, signal) {
   const params = new URLSearchParams({ q: query, ...extraParams });
   const url = `${API_BASE}/search/${endpoint}?${params}`;
-  const r = await fetch(url);
+  const r = await fetch(url, { signal, cache: 'no-store' });
   if (!r.ok) throw new Error(`API ${r.status}`);
   return r.json();
 }
@@ -233,12 +234,30 @@ window._stGoTo = function(pageNum) {
   doSearchTitle(pageNum);
 };
 
+let keywordRequestId = 0;
+let keywordController = null;
+const keywordEmptyState = document.getElementById('sk-results').innerHTML;
+function invalidateKeywordSearch() {
+  keywordRequestId += 1;
+  keywordController?.abort();
+}
+
 async function doSearchKeyword(pageNum = 1) {
+  invalidateKeywordSearch();
+  const requestId = keywordRequestId;
+  const controller = new AbortController();
+  keywordController = controller;
   const input = document.getElementById("sk-input");
   const btn = document.getElementById("sk-btn");
   const hint = document.getElementById("sk-hint");
   const q = input.value.trim();
-  if (!q) return;
+  if (!q) {
+    hint.textContent = '';
+    document.getElementById('sk-results').innerHTML = keywordEmptyState;
+    document.getElementById('sk-pager').style.display = 'none';
+    btn.disabled = false;
+    return;
+  }
 
   // 构建带选项的查询字符串
   const fuzzyCb = document.getElementById("sk-fuzzy");
@@ -260,15 +279,22 @@ async function doSearchKeyword(pageNum = 1) {
   btn.disabled = true;
   hint.textContent = "搜索中…";
   try {
-    const data = await apiSearch("keyword", queryStr);
+    const data = await apiSearch("keyword", queryStr, {}, controller.signal);
+    if (requestId !== keywordRequestId) return;
+    if (!data.error && !data.meta) throw new Error('后端版本过旧，请重新编译 C++ 程序后重启服务');
+    if (!data.error && sortSel === 'newest' && data.docs?.length && data.meta?.sort !== 'sort:newest') {
+      throw new Error('后端没有应用年份排序，请更新 C++ 程序后重试');
+    }
     // 保存当前查询状态用于翻页
     state.keywordQuery = { q, queryStr, data, pageNum };
     renderKeywordResults(data, q, pageNum);
   } catch (e) {
+    if (requestId !== keywordRequestId || e.name === 'AbortError') return;
     hint.textContent = `搜索失败: ${e.message}`;
     document.getElementById("sk-results").innerHTML = "";
+    document.getElementById("sk-pager").style.display = "none";
   } finally {
-    btn.disabled = false;
+    if (requestId === keywordRequestId) btn.disabled = false;
   }
 }
 
@@ -286,7 +312,7 @@ function renderKeywordResults(data, query, pageNum) {
 
   const docs = data.docs || [];
   const meta = data.meta || {};
-  const totalHits = meta.total_hits || data.total || docs.length;
+  const totalHits = meta.total_hits ?? data.total ?? docs.length;
   const pageSize = meta.page_size || 20;
   const totalPages = Math.max(1, Math.ceil(totalHits / pageSize));
 
@@ -549,121 +575,7 @@ async function bootstrap() {
     if (e.key === "Enter" && !e.isComposing) doSearchTitle();
   });
 
-  // 关键字搜索（防抖 300ms）+ 输入提示（防抖 120ms）
-  {
-    let skTimer = null;
-    let suggestTimer = null;
-    let suggestIndex = -1;
-    const skInput = document.getElementById("sk-input");
-    const skSuggest = document.getElementById("sk-suggest");
-
-    const skDebounce = () => {
-      if (skTimer) clearTimeout(skTimer);
-      skTimer = setTimeout(doSearchKeyword, 300);
-    };
-
-    const closeSuggest = () => {
-      skSuggest.style.display = "none";
-      skSuggest.innerHTML = "";
-      suggestIndex = -1;
-    };
-
-    const selectSuggest = (term) => {
-      const val = skInput.value;
-      // 替换最后一个 token 为选中的补全词
-      const lastSpace = val.lastIndexOf(" ");
-      const prefix = lastSpace >= 0 ? val.substring(0, lastSpace + 1) : "";
-      skInput.value = prefix + term;
-      closeSuggest();
-      // 立即搜索
-      if (skTimer) { clearTimeout(skTimer); skTimer = null; }
-      doSearchKeyword();
-    };
-
-    const fetchSuggest = async () => {
-      const val = skInput.value;
-      if (val.length < 1) { closeSuggest(); return; }
-      // 提取前缀（最后一个空格之前的部分），供下拉显示时拼接在补全词前面
-      const lastSpace = val.lastIndexOf(" ");
-      const prefix = lastSpace >= 0 ? val.substring(0, lastSpace + 1) : "";
-      try {
-        const r = await fetch(`/api/suggest/keyword?q=${encodeURIComponent(val)}`);
-        if (!r.ok) { closeSuggest(); return; }
-        const data = await r.json();
-        if (data.error || !data.terms || data.terms.length === 0) { closeSuggest(); return; }
-        suggestIndex = -1;
-        const items = data.terms.map((t, i) =>
-          `<div class="suggest-item" data-idx="${i}" data-term="${escapeHtml(t)}">${escapeHtml(prefix + t)}</div>`
-        ).join("");
-        skSuggest.innerHTML = items;
-        skSuggest.style.display = "";
-        // 绑定点击
-        skSuggest.querySelectorAll(".suggest-item").forEach((el) => {
-          el.addEventListener("mousedown", (e) => {
-            e.preventDefault();
-            selectSuggest(el.dataset.term);
-          });
-        });
-      } catch {
-        closeSuggest();
-      }
-    };
-
-    skInput.addEventListener("input", () => {
-      skDebounce();
-      if (suggestTimer) clearTimeout(suggestTimer);
-      suggestTimer = setTimeout(fetchSuggest, 120);
-    });
-    skInput.addEventListener("keydown", (e) => {
-      if (e.isComposing) return;
-      const items = skSuggest.querySelectorAll(".suggest-item");
-      if (e.key === "ArrowDown" && items.length > 0) {
-        e.preventDefault();
-        suggestIndex = Math.min(suggestIndex + 1, items.length - 1);
-        items.forEach((el, i) => el.classList.toggle("active", i === suggestIndex));
-      } else if (e.key === "ArrowUp" && items.length > 0) {
-        e.preventDefault();
-        suggestIndex = Math.max(suggestIndex - 1, -1);
-        items.forEach((el, i) => el.classList.toggle("active", i === suggestIndex));
-      } else if (e.key === "Enter") {
-        if (suggestIndex >= 0 && items.length > 0) {
-          e.preventDefault();
-          const sel = items[suggestIndex];
-          if (sel) selectSuggest(sel.dataset.term);
-          return;
-        }
-        if (skTimer) { clearTimeout(skTimer); skTimer = null; }
-        closeSuggest();
-        doSearchKeyword();
-      } else if (e.key === "Escape") {
-        closeSuggest();
-      }
-    });
-    skInput.addEventListener("blur", () => {
-      // 延迟关闭，让 mousedown 先触发
-      setTimeout(closeSuggest, 150);
-    });
-    skInput.addEventListener("focus", () => {
-      if (skInput.value.length >= 1) fetchSuggest();
-    });
-    document.getElementById("sk-btn").addEventListener("click", () => {
-      if (skTimer) { clearTimeout(skTimer); skTimer = null; }
-      closeSuggest();
-      doSearchKeyword();
-    });
-
-    // 搜索选项变更时立即重新搜索
-    const skReSearch = () => {
-      if (skTimer) { clearTimeout(skTimer); skTimer = null; }
-      closeSuggest();
-      doSearchKeyword();
-    };
-    document.getElementById("sk-fuzzy").addEventListener("change", skReSearch);
-    document.getElementById("sk-fuzzy-level").addEventListener("change", skReSearch);
-    document.getElementById("sk-mode-and").addEventListener("change", skReSearch);
-    document.getElementById("sk-sort").addEventListener("change", skReSearch);
-    document.getElementById("sk-size").addEventListener("change", skReSearch);
-  }
+  bindKeywordControls({ search: doSearchKeyword, invalidate: invalidateKeywordSearch, apiBase: API_BASE });
 
   // 合作关系图
   document.getElementById("render-btn").addEventListener("click", () => {
