@@ -15,10 +15,11 @@ def main():
     target.parent.mkdir(exist_ok=True)
     sources = ['src/main.cpp', 'src/ExtremeEngine.cpp', 'src/ExtremeParser.cpp',
                'src/Analyzer.cpp', 'src/F5Profile.cpp', 'src/QuerySuite.cpp']
+    # Keep the default CPU target so releases can run on other cloud nodes.
     # Relative source paths avoid MinGW Makefiles' Windows Unicode-path limitations.
     with tempfile.TemporaryDirectory(prefix='dblp-backend-') as temporary:
         output = Path(temporary) / target.name
-        command = [compiler, '-std=c++20', '-O3', '-DNDEBUG', '-march=native', '-pthread', '-I', 'include', *sources]
+        command = [compiler, '-std=c++20', '-O3', '-DNDEBUG', '-pthread', '-I', 'include', *sources]
         if os.name == 'nt':
             command += ['-static', '-static-libgcc', '-static-libstdc++']
         command += ['-o', str(output)]

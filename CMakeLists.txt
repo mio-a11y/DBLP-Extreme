@@ -24,7 +24,7 @@ if(MSVC)
     target_compile_options(dblp_extreme PRIVATE /O2 /EHsc /utf-8)
 else()
     target_compile_definitions(dblp_extreme PRIVATE NDEBUG)
-    # 下面两行已经安全移除了 -flto
-    target_compile_options(dblp_extreme PRIVATE -O3 -march=native -pthread)
+    # Use the default CPU target for portable cloud deployments.
+    target_compile_options(dblp_extreme PRIVATE -O3 -pthread)
     target_link_options(dblp_extreme PRIVATE -pthread -static -static-libgcc -static-libstdc++)
 endif()
