@@ -8,14 +8,14 @@ import {
   loadCliqueCounts,
   computeClique,
   loadEgo,
-} from "./data-loader.js";
-import { renderEgo } from "./graph.js";
+} from "./data-loader.js?v=academic-20261110-2";
+import { renderEgo, resizeGraph } from "./graph.js?v=academic-20261110-2";
 import {
   renderTop100Chart,
   renderYearChart,
   renderCliqueChart,
   renderWordCloud,
-} from "./charts.js";
+} from "./charts.js?v=academic-20261110-2";
 
 // ---------- 状态 ----------
 const state = {
@@ -26,10 +26,31 @@ const state = {
   loaded: {},
 };
 
+// 页面文案与导航共用原有 Tab 标识，不改变接口或查询参数。
+const viewCopy = {
+  'search-author': ['作者检索', 'LITERATURE DISCOVERY / 01', '从一位作者，开始探索。', '检索学术文献，连接研究者与知识。你的下一条研究线索，从这里开始。'],
+  'search-title': ['标题检索', 'LITERATURE DISCOVERY / 02', '沿着标题，找到新的线索。', '从熟悉的词句出发，发现与你的研究有关的论文。'],
+  'search-keyword': ['关键词检索', 'LITERATURE DISCOVERY / 03', '让研究主题，逐渐清晰。', '组合关键词、调整匹配方式，在文献中找到更相关的答案。'],
+  'graph': ['合作网络', 'RESEARCH CONNECTIONS / 04', '看见研究者之间的连接。', '以作者为中心，探索合作关系，并查看每个节点背后的论文。'],
+  'top100': ['高产作者', 'RESEARCH INSIGHTS / 05', '从学术足迹，认识研究者。', '按发文数量浏览 Top 100 作者，点击姓名进一步探索合作网络。'],
+  'years': ['年度热词', 'RESEARCH INSIGHTS / 06', '在时间里，发现研究的脉络。', '选择年份，以柱状图或词云观察当年的高频研究主题。'],
+  'cliques': ['聚团统计', 'RESEARCH INSIGHTS / 07', '探索紧密相连的学术群体。', '统计合作网络中的完全子图；阶数越高，计算可能需要更长时间。'],
+};
+
 // ---------- Tab 切换 ----------
 function setActiveTab(tabName) {
+  const copy = viewCopy[tabName];
+  if (copy) {
+    ['current-location', 'page-eyebrow', 'page-title', 'page-description'].forEach((id, i) => {
+      document.getElementById(id).textContent = copy[i];
+    });
+    document.title = `${copy[0]} · DBLP Extreme`;
+  }
   document.querySelectorAll(".tab").forEach((b) => {
-    b.classList.toggle("active", b.dataset.tab === tabName);
+    const active = b.dataset.tab === tabName;
+    b.classList.toggle("active", active);
+    if (active) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
   });
   document.querySelectorAll(".view").forEach((v) => {
     v.classList.toggle("active", v.id === `view-${tabName}`);
@@ -38,6 +59,11 @@ function setActiveTab(tabName) {
 
 async function showTab(tabName) {
   setActiveTab(tabName);
+  if (tabName === "graph") requestAnimationFrame(resizeGraph);
+  if (tabName === "years" && state.loaded.years && yearViewMode === "cloud") {
+    const year = document.getElementById('year-select').value;
+    if (state.years?.[year]) requestAnimationFrame(() => renderWordCloud(state.years[year]));
+  }
   if (state.loaded[tabName]) return;
 
   if (tabName === "search-author") {
@@ -385,7 +411,7 @@ function renderTop100Table(data) {
   tbody.innerHTML = "";
   data.forEach((d) => {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td class="rank">${d.rank}</td><td>${escapeHtml(d.name)}</td><td class="num">${d.paper_count}</td>`;
+    tr.innerHTML = `<td class="rank">${d.rank}</td><td><button class="author-link" type="button">${escapeHtml(d.name)}</button></td><td class="num">${d.paper_count}</td>`;
     tr.addEventListener("click", () => {
       document.getElementById("author-input").value = d.name;
       showTab("graph");
@@ -482,12 +508,29 @@ async function bootstrap() {
   await initDataSource();
   const badge = document.getElementById("data-source-badge");
   if (isMockMode()) {
-    badge.textContent = "数据源: Mock";
+    badge.textContent = "统计数据：示例";
+    badge.title = "统计图表当前使用示例数据；文献搜索仍需连接后端 API。";
     badge.classList.add("mock");
   } else {
-    badge.textContent = "数据源: 后端导出";
+    badge.textContent = "统计数据：后端导出";
+    badge.title = "统计图表来自后端导出的数据文件。";
     badge.classList.add("real");
   }
+
+  // 快捷入口保留既有路由与搜索处理。
+  document.querySelectorAll('[data-open-tab]').forEach((button) => {
+    button.addEventListener('click', () => {
+      showTab(button.dataset.openTab);
+      document.getElementById('main-content').focus({ preventScroll: true });
+    });
+  });
+  document.querySelectorAll('[data-search-target]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const prefix = button.dataset.searchTarget;
+      document.getElementById(`${prefix}-input`).value = button.dataset.query;
+      ({ sa: doSearchAuthor, st: doSearchTitle, sk: doSearchKeyword })[prefix]();
+    });
+  });
 
   // Tab 切换
   document.querySelectorAll(".tab").forEach((btn) => {
@@ -497,13 +540,13 @@ async function bootstrap() {
   // 作者搜索
   document.getElementById("sa-btn").addEventListener("click", () => doSearchAuthor());
   document.getElementById("sa-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") doSearchAuthor();
+    if (e.key === "Enter" && !e.isComposing) doSearchAuthor();
   });
 
   // 标题搜索
   document.getElementById("st-btn").addEventListener("click", () => doSearchTitle());
   document.getElementById("st-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") doSearchTitle();
+    if (e.key === "Enter" && !e.isComposing) doSearchTitle();
   });
 
   // 关键字搜索（防抖 300ms）+ 输入提示（防抖 120ms）
@@ -572,6 +615,7 @@ async function bootstrap() {
       suggestTimer = setTimeout(fetchSuggest, 120);
     });
     skInput.addEventListener("keydown", (e) => {
+      if (e.isComposing) return;
       const items = skSuggest.querySelectorAll(".suggest-item");
       if (e.key === "ArrowDown" && items.length > 0) {
         e.preventDefault();
@@ -627,7 +671,7 @@ async function bootstrap() {
     if (name) loadGraphView(name);
   });
   document.getElementById("author-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && !e.isComposing) {
       const name = e.target.value.trim();
       if (name) loadGraphView(name);
     }
@@ -653,8 +697,9 @@ async function bootstrap() {
   // 词云 / 柱状图切换
   document.querySelectorAll(".toggle-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".toggle-btn").forEach((b) => { b.classList.remove("active"); b.setAttribute("aria-pressed", "false"); });
       btn.classList.add("active");
+      btn.setAttribute("aria-pressed", "true");
       yearViewMode = btn.dataset.view;
       const sel = document.getElementById("year-select");
       if (state.years && sel.value && state.years[sel.value]) {
@@ -665,6 +710,9 @@ async function bootstrap() {
 
   // 窗口大小变化时重绘词云（Canvas 需要精确尺寸）
   window.addEventListener("resize", () => {
+    if (document.getElementById('view-graph').classList.contains('active')) {
+      requestAnimationFrame(resizeGraph);
+    }
     if (yearViewMode === "cloud" && state.years) {
       const sel = document.getElementById("year-select");
       if (sel.value && state.years[sel.value]) {

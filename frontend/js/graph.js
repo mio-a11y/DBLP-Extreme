@@ -7,7 +7,7 @@ const STYLE = [
   {
     selector: "node",
     style: {
-      "background-color": "#5b8ed4",
+      "background-color": "#7294a0",
       label: "data(label)",
       "font-size": 11,
       color: "#1f2933",
@@ -18,14 +18,14 @@ const STYLE = [
       width: "data(size)",
       height: "data(size)",
       "border-width": 1,
-      "border-color": "#2b3a67",
+      "border-color": "#183b50",
     },
   },
   {
     selector: "node.center",
     style: {
-      "background-color": "#d04a4a",
-      "border-color": "#a32020",
+      "background-color": "#183b50",
+      "border-color": "#102d40",
       "border-width": 2,
       "font-weight": "bold",
       "font-size": 13,
@@ -34,14 +34,14 @@ const STYLE = [
   {
     selector: "node:selected",
     style: {
-      "border-color": "#f5a623",
+      "border-color": "#b3873d",
       "border-width": 3,
     },
   },
   {
     selector: "edge",
     style: {
-      "line-color": "#b0bcd0",
+      "line-color": "#c2d0d5",
       "curve-style": "bezier",
       width: "data(width)",
       opacity: 0.7,
@@ -50,7 +50,7 @@ const STYLE = [
   {
     selector: "edge:selected",
     style: {
-      "line-color": "#f5a623",
+      "line-color": "#b3873d",
       opacity: 1,
     },
   },
@@ -88,6 +88,7 @@ function ensureCy() {
 
 export function renderEgo(ego, onNodeClick) {
   const cyInst = ensureCy();
+  cyInst.resize();
   const maxPapers = Math.max(...ego.nodes.map((n) => n.paper_count || 1));
   const maxWeight = Math.max(...ego.edges.map((e) => e.weight || 1), 1);
 
@@ -135,4 +136,11 @@ export function renderEgo(ego, onNodeClick) {
 
 export function clearGraph() {
   if (cy) cy.elements().remove();
+}
+
+export function resizeGraph() {
+  if (cy) {
+    cy.resize();
+    cy.fit(null, 40);
+  }
 }

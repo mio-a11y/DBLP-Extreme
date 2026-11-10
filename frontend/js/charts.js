@@ -4,11 +4,24 @@ let top100Chart = null;
 let yearChart = null;
 let cliqueChart = null;
 
-const BAR_COLOR = "#5b8ed4";
-const BAR_COLOR_HOVER = "#2b3a67";
+const BAR_COLOR = "#537f90";
+const BAR_COLOR_HOVER = "#183b50";
+if (typeof Chart !== 'undefined') {
+  Chart.defaults.color = '#52616c';
+  Chart.defaults.font.family = '"Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
+  Chart.defaults.font.size = 12;
+  Chart.defaults.borderColor = '#e8eceb';
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) Chart.defaults.animation = false;
+  else Chart.defaults.animation.duration = 250;
+  Chart.defaults.plugins.tooltip.backgroundColor = '#183b50';
+  Chart.defaults.plugins.tooltip.padding = 12;
+  Chart.defaults.plugins.tooltip.cornerRadius = 6;
+}
 
 export function renderTop100Chart(top100, limit) {
   const data = top100.slice(0, limit);
+  // 每个作者保留可读行高，长图表在卡片内滚动。
+  document.getElementById('top100-chart').parentElement.style.height = Math.max(380, data.length * 25 + 48) + 'px';
   const ctx = document.getElementById("top100-chart").getContext("2d");
 
   if (top100Chart) top100Chart.destroy();
@@ -86,8 +99,8 @@ export function renderYearChart(yearData) {
 // ---------- 词云 ----------
 let wordCloudData = null;
 const WC_COLORS = [
-  "#2b3a67", "#5b8ed4", "#e07030", "#3e8c5a", "#c94d6a",
-  "#6b4d99", "#d4892a", "#407090", "#a04050", "#558844",
+  "#183b50", "#537f90", "#9b752c", "#417466", "#76664f",
+  "#49657f", "#8a6537", "#376b78", "#805d63", "#5b734d",
 ];
 
 export function renderWordCloud(yearData) {
@@ -98,8 +111,9 @@ export function renderWordCloud(yearData) {
 
   const dpr = window.devicePixelRatio || 1;
   const rect = wrap.getBoundingClientRect();
-  const w = rect.width;
-  const h = rect.height;
+  const css = getComputedStyle(wrap);
+  const w = rect.width - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+  const h = rect.height - parseFloat(css.paddingTop) - parseFloat(css.paddingBottom);
   if (w <= 0 || h <= 0) return;
 
   canvas.width = w * dpr;
@@ -145,9 +159,14 @@ export function renderWordCloud(yearData) {
 
   for (let idx = 0; idx < sorted.length; idx++) {
     const item = sorted[idx];
-    const fontSize = Math.round(14 + ((item.freq - minFreq) / fRange) * 58);
+    let fontSize = Math.round(14 + ((item.freq - minFreq) / fRange) * 58);
     ctx.font = `bold ${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-    const metrics = ctx.measureText(item.term);
+    let metrics = ctx.measureText(item.term);
+    if (metrics.width > w - 8) {
+      fontSize = Math.max(10, Math.floor(fontSize * (w - 8) / metrics.width));
+      ctx.font = `bold ${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`;
+      metrics = ctx.measureText(item.term);
+    }
     const tw = metrics.width;
     const th = fontSize * 1.1;
 
