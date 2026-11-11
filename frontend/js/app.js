@@ -1,3 +1,4 @@
+import { initMobileLayout, syncMobileNavigation, refreshRankingPages } from "./mobile-layout.js?v=mobile-20261111-1";
 import { bindKeywordControls } from "./keyword-controls.js?v=keyword-fix-20261110-1";
 // 入口：搜索 Tab + 可视化 Tab 路由、事件绑定
 
@@ -16,7 +17,7 @@ import {
   renderYearChart,
   renderCliqueChart,
   renderWordCloud,
-} from "./charts.js?v=academic-20261110-2";
+} from "./charts.js?v=mobile-20261111-1";
 
 // ---------- 状态 ----------
 const state = {
@@ -40,6 +41,7 @@ const viewCopy = {
 
 // ---------- Tab 切换 ----------
 function setActiveTab(tabName) {
+  syncMobileNavigation(tabName);
   const copy = viewCopy[tabName];
   if (copy) {
     ['current-location', 'page-eyebrow', 'page-title', 'page-description'].forEach((id, i) => {
@@ -445,6 +447,7 @@ function renderTop100Table(data) {
     });
     tbody.appendChild(tr);
   });
+  refreshRankingPages();
 }
 
 async function loadYearsView() {
@@ -488,7 +491,8 @@ function renderYearView(yearData) {
 }
 
 async function loadCliquesView() {
-  await doComputeClique();
+  if (!state.cliques) document.getElementById("clique-hint").textContent = "选择最大阶数后点击开始计算。完整数据计算可能较久，并影响搜索响应。";
+  state.loaded.cliques = true;
 }
 
 async function doComputeClique() {
@@ -536,6 +540,13 @@ function escapeHtml(s) {
 
 // ---------- 启动 ----------
 async function bootstrap() {
+  initMobileLayout();
+  window.matchMedia('(max-width: 960px)').addEventListener('change', () => {
+    if (state.years && yearViewMode === 'chart') {
+      const year = document.getElementById('year-select').value;
+      if (state.years[year]) renderYearChart(state.years[year]);
+    }
+  });
   await initDataSource();
   const badge = document.getElementById("data-source-badge");
   if (isMockMode()) {

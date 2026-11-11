@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#183b50">
 <meta name="description" content="DBLP 学术文献检索与合作网络分析工作台。探索作者、论文与研究趋势。">
 <title>DBLP Extreme · 学术探索工作台</title>
-<link rel="stylesheet" href="styles.css?v=keyword-fix-20261110-1">
+<link rel="stylesheet" href="styles.css?v=mobile-20261111-1">
 <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -19,7 +19,7 @@
   <div class="sidebar-bottom"><span class="sidebar-dot"></span> 学术探索工作台 <span>v1.0</span></div>
 </aside>
 <div class="workspace">
-<header class="workspace-bar"><span>研究工作台 <span class="breadcrumb-slash">/</span> <strong id="current-location">作者检索</strong></span><div id="data-source-badge" class="badge" role="status">统计数据：检测中…</div></header>
+<header class="workspace-bar"><a class="mobile-brand" href="./" aria-label="DBLP 首页">DBLP<span>.</span></a><span class="workspace-location">研究工作台 <span class="breadcrumb-slash">/</span> <strong id="current-location">作者检索</strong></span><div id="data-source-badge" class="badge" role="status">统计数据：检测中…</div></header>
 <main id="main-content" tabindex="-1">
   <div class="page-heading"><div><p class="eyebrow" id="page-eyebrow">LITERATURE DISCOVERY / 01</p><h1 id="page-title">从一位作者，开始探索。</h1><p class="page-description" id="page-description">检索学术文献，连接研究者与知识。你的下一条研究线索，从这里开始。</p></div><span class="heading-stamp" aria-hidden="true">Research<br><em>starts here.</em></span></div>
 
@@ -57,25 +57,17 @@
       <div class="search-panel-heading"><span class="panel-kicker">检索条件</span><span class="panel-caption">研究关键词 / DBLP</span></div>
       <label class="field-label" for="sk-input">研究关键词</label>
       <div class="search-row"><div class="search-field"><svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5M8 10h5"/></svg><input id="sk-input" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="sk-suggest" type="search" placeholder="输入研究主题或关键词" autocomplete="off" aria-describedby="sk-hint sk-suggest-status"><div id="sk-suggest" role="listbox" aria-label="关键词建议" class="suggest-dropdown" style="display:none"></div></div><button id="sk-btn" class="primary-button">检索文献 <svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16m-6-6 6 6-6 6"/></svg></button></div>
-      <div class="search-options">
-        <label class="opt-label">
-          <input type="checkbox" id="sk-fuzzy" checked> 模糊搜索
-        </label>
-        <select aria-label="模糊搜索容错级别" id="sk-fuzzy-level" class="opt-select">
-          <option value="1">标准容错</option>
-          <option value="2">更宽松</option>
-        </select>
-        <label class="opt-label">
-          <input type="checkbox" id="sk-mode-and"> 必须包含所有词
-        </label>
-        <select aria-label="结果排序" id="sk-sort" class="opt-select">
-          <option value="relevance">相关度优先</option>
-          <option value="newest">最新年份优先</option>
-        </select>
-        <select aria-label="每页结果数量" id="sk-size" class="opt-select">
-          <option value="10" selected>每页 10</option>
-          <option value="50">每页 50</option>
-        </select>
+      <div class="keyword-toolbar">
+        <label class="sort-control"><span>排序</span><select aria-label="结果排序" id="sk-sort" class="opt-select"><option value="relevance">相关度优先</option><option value="newest">最新年份优先</option></select></label>
+        <details class="advanced-search">
+          <summary>检索选项</summary>
+          <div class="search-options">
+            <label class="opt-label"><input type="checkbox" id="sk-fuzzy" checked> 模糊搜索</label>
+            <select aria-label="模糊搜索容错级别" id="sk-fuzzy-level" class="opt-select"><option value="1">标准容错</option><option value="2">更宽松</option></select>
+            <label class="opt-label"><input type="checkbox" id="sk-mode-and"> 必须包含所有词</label>
+            <select aria-label="每页结果数量" id="sk-size" class="opt-select"><option value="10" selected>每页 10</option><option value="50">每页 50</option></select>
+          </div>
+        </details>
       </div>
       <div class="search-examples"><span>试着搜索</span><button type="button" class="example-chip" data-search-target="sk" data-query="graph deep learning">graph deep learning<span aria-hidden="true">↗</span></button><button type="button" class="example-chip" data-search-target="sk" data-query="information retrieval">information retrieval<span aria-hidden="true">↗</span></button></div><span id="sk-suggest-status" class="hint" role="status" aria-live="polite"></span><span id="sk-hint" class="hint" role="status" aria-live="polite"></span>
     </div>
@@ -91,7 +83,7 @@
       <span id="graph-hint" class="hint" role="status">输入任意作者名，实时生成合作网络</span>
     </div>
     <div class="graph-layout">
-      <div class="graph-stage"><div class="panel-heading"><span>作者合作网络</span><span class="graph-legend"><i></i> 中心作者 <i></i> 合作者</span></div><div id="cy" class="cy-canvas" role="img" aria-label="作者合作网络；可在高产作者表中使用键盘选择作者"></div><div class="canvas-caption">滚轮缩放 · 拖动画布 · 点击节点查看论文</div></div>
+      <div class="graph-stage"><div class="panel-heading"><span>作者合作网络</span><span class="graph-legend"><i></i> 中心作者 <i></i> 合作者</span></div><div id="cy" class="cy-canvas" role="img" aria-label="作者合作网络；可在高产作者表中使用键盘选择作者"></div><div class="canvas-caption"><span class="desktop-graph-tip">滚轮缩放 · 拖动画布</span><span class="mobile-only">双指缩放 · 单指拖动</span> · 点击节点查看论文</div></div>
       <aside class="paper-panel">
         <div class="paper-panel-header">
           <h3 id="paper-panel-title">论文列表</h3>
@@ -103,7 +95,8 @@
   </section>
 
   <!-- Tab: Top 100 -->
-  <section class="view" id="view-top100">
+  <section class="view" id="view-top100" data-mobile-display="list">
+    <div class="mobile-only ranking-switch" role="group" aria-label="作者榜单展示方式"><button type="button" data-ranking-display="list" aria-pressed="true">作者列表</button><button type="button" data-ranking-display="chart" aria-pressed="false">发文分布</button></div>
     <div class="split">
       <div class="split-left">
         <div class="panel-heading"><h2>作者榜单</h2><span class="panel-caption">按发文数排序</span></div><p class="table-help">选择作者，探索其合作网络。</p>
@@ -111,6 +104,7 @@
           <caption class="sr-only">按发文数排序的 Top 100 作者，作者姓名可跳转至合作网络</caption><thead><tr><th scope="col">排名</th><th scope="col">作者</th><th scope="col" class="num">发文数</th></tr></thead>
           <tbody></tbody>
         </table>
+        <div class="mobile-only ranking-pager" aria-label="作者榜单分页"><button type="button" id="ranking-prev">上一页</button><span id="ranking-page-info" role="status"></span><button type="button" id="ranking-next">下一页</button></div>
       </div>
       <div class="split-right">
         <div class="chart-controls">
@@ -139,7 +133,7 @@
         <button class="toggle-btn" aria-pressed="false" data-view="cloud">词云</button>
       </span>
     </div>
-    <div class="chart-wrap tall" id="year-chart-wrap"><canvas id="year-chart" role="img" aria-label="选定年份的研究关键词频次"></canvas></div>
+    <div class="chart-wrap tall" id="year-chart-wrap"><div class="year-chart-stage"><canvas id="year-chart" role="img" aria-label="选定年份的研究关键词频次"></canvas></div></div>
     <div class="chart-wrap tall" id="year-cloud-wrap" style="display:none"><canvas id="year-cloud" role="img" aria-label="选定年份的研究关键词词云"></canvas></div>
   </section>
 
@@ -165,6 +159,22 @@
 <footer class="footer"><span><strong>DBLP Extreme</strong> · 科学文献检索与可视化</span><span>探索文献之间的连接 <span class="footer-divider">/</span> 数据来源 DBLP</span></footer>
 </div>
 
-<script type="module" src="js/app.js?v=clique-limit-20261110-1"></script>
+<script type="module" src="js/app.js?v=mobile-20261111-1"></script>
+<nav class="mobile-nav" aria-label="手机主导航">
+  <button type="button" data-open-tab="search-author" aria-controls="view-search-author" aria-current="page"><svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/></svg>作者</button>
+  <button type="button" data-open-tab="search-title" aria-controls="view-search-title"><svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h10l4 4v14H5zM14 3v5h5M8 12h8M8 16h6"/></svg>标题</button>
+  <button type="button" data-open-tab="search-keyword" aria-controls="view-search-keyword"><svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5M8 10h5"/></svg>关键词</button>
+  <button type="button" id="mobile-more" aria-haspopup="dialog" aria-controls="mobile-tools" aria-expanded="false"><svg width="20" height="20" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>更多</button>
+</nav>
+<dialog id="mobile-tools" class="mobile-tools" aria-labelledby="mobile-tools-title">
+  <div class="mobile-tools-heading"><h2 id="mobile-tools-title">数据洞察</h2><button type="button" id="mobile-tools-close" aria-label="关闭更多工具">关闭</button></div>
+  <p>从文献检索，深入研究者与研究主题。</p>
+  <div class="mobile-tools-grid">
+    <button type="button" data-open-tab="graph"><strong>合作网络</strong><span>查看作者之间的合作关系</span></button>
+    <button type="button" data-open-tab="top100"><strong>高产作者</strong><span>浏览 Top 100 作者榜单</span></button>
+    <button type="button" data-open-tab="years"><strong>年度热词</strong><span>观察不同年份的研究主题</span></button>
+    <button type="button" data-open-tab="cliques"><strong>聚团统计</strong><span>分析紧密合作的学术群体</span></button>
+  </div>
+</dialog>
 </body>
 </html>

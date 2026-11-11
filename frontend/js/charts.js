@@ -60,6 +60,8 @@ export function renderTop100Chart(top100, limit) {
 }
 
 export function renderYearChart(yearData) {
+  const mobile = window.matchMedia('(max-width: 960px)').matches;
+  document.querySelector('.year-chart-stage').style.height = mobile ? Math.max(300, yearData.length * 30 + 50) + 'px' : '100%';
   const ctx = document.getElementById("year-chart").getContext("2d");
 
   if (yearChart) yearChart.destroy();
@@ -78,19 +80,20 @@ export function renderYearChart(yearData) {
       ],
     },
     options: {
+      indexAxis: mobile ? "y" : "x",
       responsive: true,
       maintainAspectRatio: false,
       plugins: {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            label: (ctx) => ` ${ctx.parsed.y} 次`,
+            label: (ctx) => ` ${mobile ? ctx.parsed.x : ctx.parsed.y} 次`,
           },
         },
       },
       scales: {
-        x: { ticks: { font: { size: 13 } } },
-        y: { beginAtZero: true },
+        x: mobile ? { beginAtZero: true } : { ticks: { font: { size: 13 } } },
+        y: mobile ? { ticks: { autoSkip: false, font: { size: 12 } } } : { beginAtZero: true },
       },
     },
   });
